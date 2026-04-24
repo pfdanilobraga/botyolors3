@@ -1,0 +1,12 @@
+mss==9.0.1
+opencv-python==4.9.0.80
+ultralytics==8.1.0
+easyocr==1.7.1
+pyautogui==0.9.54
+pydirectinput==1.0.1
+pygetwindow==0.0.9
+keyboard==0.13.5
+transitions==0.9.0
+numpy==1.26.3
+pillow==10.2.0
+pywin32==306
