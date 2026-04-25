@@ -79,9 +79,14 @@ class MouseActuator:
 
     def human_click_at(self, x: int, y: int, button: str = 'left'):
         """
-        Moves to a target and clicks.
+        Adiciona ruído no alvo final, move de forma orgânica e clica.
         """
-        self.move_to(x, y)
+        # Desvia o alvo final em até 4 pixels para qualquer direção.
+        # Assim, o clique nunca ocorre no exato centro detectado pelo YOLO.
+        target_x = x + random.randint(-4, 4)
+        target_y = y + random.randint(-4, 4)
+        
+        self.move_to(target_x, target_y)
         time.sleep(random.uniform(0.05, 0.2))
         self.click(button)
 
