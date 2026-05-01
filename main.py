@@ -55,28 +55,32 @@ class BotController:
 
     def _configure_session(self):
         """Lê os dados da GUI e configura os serviços para o 'Play'."""
-        use_survival = self.gui.use_prayer_var.get()
-        use_ia = self.gui.use_yolo_var.get() # Lendo o novo checkbox da GUI
+        # 1. Captura estados da GUI (Desacoplados)
+        use_pot = self.gui.use_potion_var.get()
+        use_pray = self.gui.use_prayer_var.get()
+        use_mask = self.gui.use_mask_var.get()
+        use_ia = self.gui.use_yolo_var.get()
         
+        # 2. Captura chaves e caminhos
+        pot_key = self.gui.potion_key_var.get().strip()
+        pray_key = self.gui.prayer_key_var.get().strip()
+        mask_key = self.gui.mask_key_var.get().strip()
+
         skill = self.gui.skill_var.get()
         target = self.gui.target_var.get()
         model_path = self.gui.model_path_var.get()
 
-        use_mask = self.gui.use_mask_var.get()
-        mask_key = self.gui.mask_key_var.get().strip()
-
-        # 1. Configura Sobrevivência
-        if use_survival:
-            pot_key = self.gui.potion_key_var.get().strip()
-            pray_key = self.gui.prayer_key_var.get().strip() or None
-           
-            self.survival_manager.configure_all(True, pot_key, pray_key, mask_key, use_mask)
-        else:
-            self.survival_manager.configure_all(False, None, None, None, False)
-
-        # 2. Configura IA (Somente se o checkbox da IA estiver marcado)
+        # Passamos cada estado individualmente para o manager
+        self.survival_manager.configure_all(
+            pot_enabled=use_pot,
+            pot_key=pot_key,
+            pray_enabled=use_pray,
+            pray_key=pray_key,
+            mask_enabled=use_mask,
+            mask_key=mask_key
+        )
+        # Configura IA (YOLO)
         has_ia_active = use_ia and all([model_path, target, skill])
-        
         if has_ia_active:
             if not self.detector.update_model(model_path):
                 raise RuntimeError("Erro ao carregar modelo .pt")
@@ -85,7 +89,7 @@ class BotController:
             self.fsm.target_class = None
             if not use_ia:
                 self.gui.log("[MODO] IA Desativada pelo usuário.")
-            self.gui.log("[MODO] Iniciando apenas Survival Service.")
+            self.gui.log("[MODO] Serviços de suporte ativos conforme seleção.")
 
         return has_ia_active
 
@@ -113,6 +117,8 @@ class BotController:
         while self.is_running:
             frame = self.capture.get_frame()
             if frame is None: 
+                self.gui.log("[ERRO VISÃO] Janela do jogo não detectada!")
+                time.sleep(2)
                 continue
 
             # 1. Prioridade: Sobrevivência (Sempre roda se configurado)

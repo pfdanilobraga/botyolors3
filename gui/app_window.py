@@ -21,8 +21,10 @@ class BotInterface:
         self.xp_anchor_var = ctk.StringVar()
         
         # Variáveis de Sobrevivência
-        self.use_prayer_var = ctk.BooleanVar(value=False)
+        self.use_potion_var = ctk.BooleanVar(value=False)
         self.potion_key_var = ctk.StringVar(value="2")
+        #variaveis de prayer
+        self.use_prayer_var = ctk.BooleanVar(value=False)
         self.prayer_key_var = ctk.StringVar(value="3")
          # Variáveis de Máscara
         self.use_mask_var = ctk.BooleanVar(value=False)
@@ -74,32 +76,45 @@ class BotInterface:
         self.model_entry = ctk.CTkEntry(self.ia_config_frame, textvariable=self.model_path_var, state="disabled")
         self.model_entry.grid(row=2, column=1, sticky="ew", pady=5, padx=10)
 
+       # ==========================================
+        # SEÇÃO: SOBREVIVÊNCIA (POTION)
         # ==========================================
-        # SEÇÃO: SOBREVIVÊNCIA (Layout Ajustado)
+        potion_group = ctk.CTkFrame(main_frame)
+        potion_group.pack(fill="x", padx=10, pady=5)
+        potion_group.columnconfigure(1, weight=1)
+
+        self.potion_checkbox = ctk.CTkCheckBox(
+            potion_group, text="Auto-Potion (Restaurar Recurso)", 
+            variable=self.use_potion_var, 
+            command=self._toggle_potion_entry, # Novo método de toggle
+            font=ctk.CTkFont(weight="bold"),
+            fg_color="#e67e22" # Cor laranja para destacar poções
+        )
+        self.potion_checkbox.grid(row=0, column=0, columnspan=2, padx=10, pady=(10, 5), sticky="w")
+
+        ctk.CTkLabel(potion_group, text="Hotkey Potion:", text_color="gray").grid(row=1, column=0, padx=(20, 5), pady=(0, 10), sticky="w")
+        self.potion_entry = ctk.CTkEntry(potion_group, textvariable=self.potion_key_var, width=60, state="disabled")
+        self.potion_entry.grid(row=1, column=1, padx=10, pady=(0, 10), sticky="w")
+
+        # ==========================================
+        # SEÇÃO: SOBREVIVÊNCIA (PRAYER/CURSE)
         # ==========================================
         prayer_group = ctk.CTkFrame(main_frame)
-        prayer_group.pack(fill="x", padx=10, pady=10)
-        
-        # Configuramos as colunas para os inputs ficarem alinhados
+        prayer_group.pack(fill="x", padx=10, pady=5)
         prayer_group.columnconfigure(1, weight=1)
 
-        # 1. Checkbox Principal (Ocupa as duas colunas)
         self.prayer_checkbox = ctk.CTkCheckBox(
-            prayer_group, text="Auto-Restore (Potion/Prayer)", 
-            variable=self.use_prayer_var, command=self._toggle_prayer_entry,
-            font=ctk.CTkFont(weight="bold")
+            prayer_group, text="Auto-Prayer (Reativar Orações)", 
+            variable=self.use_prayer_var, 
+            command=self._toggle_prayer_entry,
+            font=ctk.CTkFont(weight="bold"),
+            fg_color="#f1c40f" # Cor amarela para destacar prayer
         )
         self.prayer_checkbox.grid(row=0, column=0, columnspan=2, padx=10, pady=(10, 5), sticky="w")
 
-        # 2. Linha da Hotkey Potion
-        ctk.CTkLabel(prayer_group, text="Hotkey Potion:", text_color="gray").grid(row=1, column=0, padx=(20, 5), pady=5, sticky="w")
-        self.potion_entry = ctk.CTkEntry(prayer_group, textvariable=self.potion_key_var, width=60, state="disabled")
-        self.potion_entry.grid(row=1, column=1, padx=10, pady=5, sticky="w")
-
-        # 3. Linha da Hotkey Auto-Restore (Prayer)
-        ctk.CTkLabel(prayer_group, text="Hotkey Prayer:", text_color="gray").grid(row=2, column=0, padx=(20, 5), pady=5, sticky="w")
+        ctk.CTkLabel(prayer_group, text="Hotkey Prayer:", text_color="gray").grid(row=1, column=0, padx=(20, 5), pady=(0, 10), sticky="w")
         self.prayer_entry = ctk.CTkEntry(prayer_group, textvariable=self.prayer_key_var, width=60, state="disabled")
-        self.prayer_entry.grid(row=2, column=1, padx=10, pady=(5, 10), sticky="w")
+        self.prayer_entry.grid(row=1, column=1, padx=10, pady=(0, 10), sticky="w")
         # ==========================================
         # SEÇÃO: CRYSTAL MASK (Timer Service)
         # ==========================================
@@ -144,9 +159,12 @@ class BotInterface:
         self.target_combo.configure(state=state)
         self.ia_config_frame.configure(fg_color="transparent" if state == "normal" else "#2b2b2b")
 
+    def _toggle_potion_entry(self):
+        state = "normal" if self.use_potion_var.get() else "disabled"
+        self.potion_entry.configure(state=state)
+
     def _toggle_prayer_entry(self):
         state = "normal" if self.use_prayer_var.get() else "disabled"
-        self.potion_entry.configure(state=state)
         self.prayer_entry.configure(state=state)
 
     def _on_skill_change(self, value=None):

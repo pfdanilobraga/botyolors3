@@ -115,7 +115,6 @@ class TargetSeekerFSM:
             # Chama o YOLO
             detections = self.detector.detect(frame, conf_threshold=0.5)
 
-            # targets = [d for d in detections if d["class"] == self.target_class]
             targets = [
                 d for d in detections if self.target_class.lower() in d["class"].lower()
             ]

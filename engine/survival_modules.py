@@ -1,5 +1,7 @@
 import time
-from vision.uiValidators import UIValidator
+import cv2 
+import numpy as np 
+from vision.uiValidators import UIValidator 
 
 class SurvivalModule:
     """Classe base para garantir que todos os módulos tenham a mesma estrutura."""
@@ -15,96 +17,107 @@ class SurvivalModule:
 class PotionModule(SurvivalModule):
     def __init__(self, keyboard, logger_func, controller=None):
         super().__init__(keyboard, logger_func)
-        self.prayer_module = None
-        self.controller = controller 
+        self.controller = controller
         self.attempts = 0
         self.max_attempts = 3
         self.is_halted = False
 
-    def configure(self, enabled, pot_key, prayer_mod, img_path="prayer_empty.png"):
+    def configure(self, enabled, pot_key, img_path="prayer_empty.png"):
         self.enabled = enabled
         self.pot_key = pot_key
-        self.prayer_module = prayer_mod  
         self.validator = UIValidator(img_path) if enabled else None
         self.attempts = 0
         self.is_halted = False
 
     def check(self, frame):
+        if not self.enabled or self.validator is None:
+            return
+            
         is_empty = self.validator.is_visible(frame, threshold=0.9)
 
         if self.is_halted and not is_empty:
             self.is_halted = False
             self.attempts = 0
+            self.log("[POTION] Barra preenchida. Módulo reativado.")
             return
 
-        if not self.enabled or self.is_halted:
+        if self.is_halted:
             return
             
-        if (time.time() - self.last_action_time < 10.0):
+        now = time.time()
+        if (now - self.last_action_time < 10.0):
             return
         
         if is_empty:
             if self.attempts < self.max_attempts:
                 self.attempts += 1
-                self.log(f"[SURVIVAL] Prayer 0! Iniciando combo de 2 doses (Tentativa {self.attempts}/3)...")
+                self.log(f"[POTION] Prayer 0! Combo de 2 doses (Tentativa {self.attempts}/2)...")
         
                 for i in range(2):
-                    self.log(f" > Dose {i+1}/2...")
                     self.keyboard.press(self.pot_key)
-                    time.sleep(0.8) 
+                    time.sleep(1.5) 
                 
-                if self.prayer_module:
-                    time.sleep(0.5)
-                    self.prayer_module.activate()
-                    
-                self.last_action_time = time.time()
+                self.last_action_time = now
             else:
                 self.is_halted = True
-                self.log("!!! [ALERTA] Combo de 3x falhou em restaurar a visão da Prayer.")
-        
+                self.log("!!! [ALERTA] Falha crítica: Recurso não restaurado após 2 combos.")
         else:
             if self.attempts > 0:
-                self.log("[SURVIVAL] Prayer restaurada. Resetando contador.")
                 self.attempts = 0
 
 class PrayerModule(SurvivalModule):
-    def configure(self, enabled, pray_key):
+    def __init__(self, keyboard, logger_func):
+        super().__init__(keyboard, logger_func)
+        self.last_activation = 0
+        self.scales = [1.0, 1.05, 1.1, 1.15] 
+
+    def configure(self, enabled, pray_key, img_path="prayer_activated.png"):
         self.enabled = enabled
         self.pray_key = pray_key
+        self.validator = UIValidator(img_path) if enabled else None
 
-    def activate(self):
-        """Método chamado externamente para reativar a prayer."""
-        if not self.enabled or not self.pray_key:
+    def check(self, frame):
+        if not self.enabled or self.validator is None:
             return
-            
-        time.sleep(1.2)
-        self.keyboard.press(self.pray_key)
-        self.log(f"[SURVIVAL] Reativando Prayer: {self.pray_key}")
+
+        now = time.time()
+        # Cooldown de 3 segundos para evitar spam durante a animação de ativação
+        if (now - self.last_activation < 3.0):
+            return
+
+        confidence, roi = self.validator.get_match_data(frame, threshold=0.8, scales=self.scales)
+
+        if confidence >= 0.85 and roi is not None:
+            hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+            avg_brightness = np.mean(hsv_roi[:, :, 2]) 
+
+            # Verificação de estado por brilho (Glow da Oração)
+            if avg_brightness < 82:
+                self.log(f"[PRAYER] Ativando... Brilho detectado: {avg_brightness:.1f}")
+                self.keyboard.press(self.pray_key)
+                self.last_activation = now
 
 class CrystalMaskModule(SurvivalModule):
     def __init__(self, keyboard, logger_func):
         super().__init__(keyboard, logger_func)
         self.mask_key = None
-        self.interval = 290  # 4 minutos e 50 segundos em segundos
+        self.interval = 290  # 4 minutos e 50 segundos
         self.last_activation = 0
 
     def configure(self, enabled, mask_key):
         self.enabled = enabled
         self.mask_key = mask_key
+        # Inicializa o tempo como 'agora' ao configurar, para não gastar recurso no login
         self.last_activation = time.time()
 
     def check(self, frame):
         if not self.enabled or not self.mask_key:
             return
 
-        current_time = time.time()
-        elapsed = current_time - self.last_activation
+        now = time.time()
+        elapsed = now - self.last_activation
 
         if elapsed >= self.interval:
-            self.log(f"[CRYSTAL MASK] Tempo esgotado ({elapsed:.0f}s). Reativando máscara...")
-            
-            # Executa a ação de apertar a tecla
+            self.log(f"[CRYSTAL MASK] Renovando máscara ({elapsed:.0f}s passados).")
             self.keyboard.press(self.mask_key)
-            
-            # Reseta o timer
-            self.last_activation = current_time
+            self.last_activation = now
