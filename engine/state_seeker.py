@@ -66,7 +66,7 @@ class TargetSeekerFSM:
         #    REDEFINIÇÃO DE PERFIL DE AÇÃO
         # ==========================================
 
-    def setup_session(self, target_class: str, validator_name: str = None):
+    def setup_session(self, target_class: str, validator_name: str = None, prayer_image:str=None):
         """Atualiza o alvo e o validador para a nova sessão."""
         self.target_class = target_class
 
