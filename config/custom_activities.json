@@ -5,6 +5,15 @@
       "target": "Iron_rock",
       "xp_validator": "indicadores/xp_mineracao.png",
       "drop_item": "iron_ore.png"
+    },
+    "Mithril": {
+      "model": "models/mineracao/mini_mithril.pt",
+      "target": "mithril_rock",
+      "xp_validator": "indicadores/xp_mineracao.png",
+      "drop_item": "mithril_ore.png",
+      "priority_targets": [
+        "mithril_rockbuff"
+      ]
     }
   }
 }

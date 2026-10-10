@@ -1,6 +1,7 @@
 import ctypes
 import os
 import random
+import time
 import tkinter as tk
 from datetime import datetime
 from tkinter import messagebox
@@ -103,7 +104,7 @@ class CollectTab(ctk.CTkFrame):
 
         buttons = ctk.CTkFrame(box, fg_color="transparent")
         buttons.pack(fill="x", padx=12, pady=8)
-        ctk.CTkButton(buttons, text="Capturar agora  (F9)", width=190, command=lambda: self.capture_frame(False)).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(buttons, text="Capturar agora  (F9)", width=190, command=self.capture_from_button).pack(side="left", padx=(0, 8))
         self.auto_button = ctk.CTkButton(buttons, text="Auto-captura: DESLIGADA  (F10)", width=250, fg_color="#607D8B",
                                          command=self.toggle_auto)
         self.auto_button.pack(side="left")
@@ -169,16 +170,53 @@ class CollectTab(ctk.CTkFrame):
         self._last_small = small
         return True
 
-    def capture_frame(self, auto: bool = False) -> bool:
+    def _grab_game_frame(self):
+        """
+        Esconde o Treinador, traz o RuneScape para a frente, captura um frame e traz o Treinador de volta.
+        Necessário porque, ao clicar num botão aqui dentro, esta janela está cobrindo o jogo.
+        Retorna o frame ou None (jogo não encontrado / não deu para trazê-lo à frente).
+        """
+        self.capture.locate()
+        if not self.capture._hwnd:
+            return None
+        top = self.winfo_toplevel()
+        top.withdraw()
+        frame = None
+        try:
+            self.update_idletasks()
+            if self.capture.focus():
+                time.sleep(0.5)  # deixa o jogo repintar antes de capturar
+                if self.capture.is_visible():
+                    frame = self.capture.get_frame()
+        finally:
+            top.deiconify()
+            top.lift()
+            try:
+                top.focus_force()
+            except Exception:
+                pass
+        return frame
+
+    def capture_from_button(self):
+        """Botão 'Capturar agora': traz o jogo para a frente por um instante e captura."""
+        if not self.app.item:
+            return self._set_status("Escolha ou crie um item no topo da janela.", "#e67e22")
+        frame = self._grab_game_frame()
+        if frame is None:
+            return self._set_status("Não consegui capturar: confira se o RuneScape está aberto e não minimizado.", "#e67e22")
+        self.capture_frame(False, frame=frame)
+
+    def capture_frame(self, auto: bool = False, frame=None) -> bool:
         item = self.app.item
         if not item:
             self._set_status("Escolha ou crie um item no topo da janela.", "#e67e22")
             return False
-        if not self.capture.is_visible():
-            if not auto:
-                self._set_status("O RuneScape precisa estar visível e na frente (sem esta janela cobrindo).", "#e67e22")
-            return False
-        frame = self.capture.get_frame()
+        if frame is None:
+            if not self.capture.is_visible():
+                if not auto:
+                    self._set_status("O RuneScape precisa estar visível e na frente (ou use o botão, que o traz sozinho).", "#e67e22")
+                return False
+            frame = self.capture.get_frame()
         if frame is None:
             self._set_status("Falha ao capturar a janela do jogo.", "#e74c3c")
             return False
@@ -221,11 +259,10 @@ class CollectTab(ctk.CTkFrame):
     # ------------------------------------------------------------------ ícone (template)
 
     def open_crop(self):
-        if not self.capture.is_visible():
-            return messagebox.showinfo("Recorte", "Deixe o RuneScape visível e na frente, com o item na mochila aberta.")
-        frame = self.capture.get_frame()
+        frame = self._grab_game_frame()
         if frame is None:
-            return messagebox.showerror("Recorte", "Falha ao capturar o jogo.")
+            return messagebox.showinfo("Recorte", "Não consegui capturar o jogo. Confira se o RuneScape está aberto "
+                                                  "(não minimizado) e deixe a mochila aberta com o item visível.")
         default = (self.app.item or "item") + "_ore"
         CropDialog(self, frame, default, on_saved=self._on_template_saved)
 

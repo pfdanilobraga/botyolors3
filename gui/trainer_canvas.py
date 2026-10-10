@@ -5,8 +5,8 @@ import cv2
 import numpy as np
 from PIL import Image, ImageTk
 
-# (x1, y1, x2, y2, cor, rótulo) em pixels da IMAGEM (não da tela)
-DrawBox = Tuple[float, float, float, float, str, str]
+# (x1, y1, x2, y2, cor, rótulo[, tracejada]) em pixels da IMAGEM (não da tela)
+DrawBox = Tuple
 
 CLASS_COLORS = ["#2ecc71", "#e74c3c", "#3498db", "#f1c40f", "#9b59b6", "#e67e22", "#1abc9c", "#ff6fb5"]
 
@@ -20,12 +20,14 @@ class BoxCanvas(tk.Canvas):
     MIN_DRAG = 6  # menor arrasto (px de tela) que conta como caixa
 
     def __init__(self, master, on_draw: Optional[Callable[[float, float, float, float], None]] = None,
-                 on_right_click: Optional[Callable[[float, float], None]] = None, **kwargs):
+                 on_right_click: Optional[Callable[[float, float], None]] = None,
+                 on_click: Optional[Callable[[float, float], None]] = None, **kwargs):
         kwargs.setdefault("bg", "#1a1a1a")
         kwargs.setdefault("highlightthickness", 0)
         super().__init__(master, **kwargs)
         self.on_draw = on_draw
         self.on_right_click = on_right_click
+        self.on_click = on_click    # clique simples (sem arrastar), em coordenadas da imagem
         self.preview_color = "#ffffff"
 
         self._image: Optional[np.ndarray] = None
@@ -99,10 +101,12 @@ class BoxCanvas(tk.Canvas):
         self._photo = ImageTk.PhotoImage(Image.fromarray(cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)))
         self.create_image(self._ox, self._oy, image=self._photo, anchor="nw")
 
-        for x1, y1, x2, y2, color, label in self._boxes:
+        for box in self._boxes:
+            x1, y1, x2, y2, color, label, *extra = box
+            dashed = bool(extra and extra[0])
             cx1, cy1 = self.to_canvas(x1, y1)
             cx2, cy2 = self.to_canvas(x2, y2)
-            self.create_rectangle(cx1, cy1, cx2, cy2, outline=color, width=2)
+            self.create_rectangle(cx1, cy1, cx2, cy2, outline=color, width=2, dash=(6, 3) if dashed else ())
             if label:
                 self.create_text(cx1 + 4, cy1 + 2, text=label, fill=color, anchor="nw", font=("Segoe UI", 9, "bold"))
 
@@ -127,6 +131,10 @@ class BoxCanvas(tk.Canvas):
         if self._preview_id is not None:
             self.delete(self._preview_id)
             self._preview_id = None
+        if abs(event.x - sx) < self.MIN_DRAG and abs(event.y - sy) < self.MIN_DRAG:
+            if self.on_click:  # clique simples, não um arrasto
+                self.on_click(*self.to_image(event.x, event.y))
+            return
         if abs(event.x - sx) < self.MIN_DRAG or abs(event.y - sy) < self.MIN_DRAG:
             return
         x1, y1 = self.to_image(min(sx, event.x), min(sy, event.y))

@@ -1,40 +1,56 @@
 import glob
 import os
 import shutil
+import subprocess
 import threading
+import time
 import tkinter as tk
 import unicodedata
+import webbrowser
 from tkinter import filedialog, messagebox
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import customtkinter as ctk
 
 from config.activities import ACTIVITIES
 from training import dataset as ds
-from training import registry
+from training import colab, registry
 from training.trainer import run_training
 
 NO_DROP = "(nenhum)"
 NO_XP = "(nenhum)"
 
-COLAB_TEXT = """# 1) No Colab: Ambiente de execução > Alterar tipo de ambiente > GPU (T4)
-# 2) Envie o arquivo {zip_name} (ícone de pasta, à esquerda) e rode esta célula:
+COLAB_TEXT = """# ROTEIRO MANUAL (use só se preferir não usar o notebook pronto)
+# 1) No Colab: Ambiente de execução > Alterar tipo de ambiente > GPU (T4) > Salvar.
+# 2) Célula 1 - instala e recebe o zip (aparece o botão "Escolher arquivos": selecione {zip_name}):
 !pip -q install ultralytics
-!unzip -qo /content/{zip_name} -d /content/ds
-
-# 3) Em outra célula (termina imprimindo um bloco enorme de números: é normal, é o resultado do treino):
-from ultralytics import YOLO
-YOLO("yolov8n.pt").train(data="/content/ds/data.yaml", imgsz=512, epochs=100, batch=16)
-
-# 4) Em outra célula: baixa o melhor modelo do treino mais recente
-import glob, os
+import glob, os, zipfile
 from google.colab import files
-best = max(glob.glob("/content/runs/detect/*/weights/best.pt"), key=os.path.getmtime)
-print(best)
-files.download(best)
+files.upload()
+zipfile.ZipFile(sorted(glob.glob("/content/*.zip"), key=os.path.getmtime)[-1]).extractall("/content/ds")
 
-# 5) Volte ao Treinador e use "Instalar .pt treinado no Colab".
+# 3) Célula 2 - treino (guardar em "results" evita imprimir um bloco enorme de números):
+from ultralytics import YOLO
+results = YOLO("yolov8n.pt").train(data="/content/ds/data.yaml", imgsz={imgsz}, epochs={epochs}, batch={batch},
+                                   project="/content/runs", name="treino", exist_ok=True, plots=False)
+
+# 4) Célula 3 - baixa o modelo treinado:
+from google.colab import files
+files.download("/content/runs/treino/weights/best.pt")
 """
+
+COLAB_STEPS = """PASSO A PASSO (notebook pronto: faz tudo com um clique)
+
+1. Clique em "Abrir o Colab" (abre no navegador; entre com sua conta Google).
+2. No Colab: Arquivo > Fazer upload de notebook > escolha o arquivo  {notebook}
+   (use "Mostrar os arquivos" abaixo para achá-lo no Explorer).
+3. Ambiente de execução > Alterar tipo de ambiente > GPU (T4) > Salvar.
+4. Ambiente de execução > Executar tudo.
+5. Quando aparecer o botão "Escolher arquivos" (na 3ª célula), selecione  {zip_name}  (está na mesma pasta).
+6. Espere o treino (alguns minutos na GPU). No fim, o arquivo  {item}_best.pt  é baixado sozinho.
+7. Abaixo, use "Esperar o .pt": o Treinador detecta o arquivo baixado e instala (como assistente ou como modelo final).
+
+Se o Chrome perguntar se pode baixar vários arquivos, permita."""
 
 
 def slug(text: str) -> str:
@@ -51,6 +67,7 @@ class TrainTab(ctk.CTkFrame):
         self.app = app
         self._stop = False
         self._training = False
+        self._assets_initialized = False   # o 1º preenchimento escolhe os padrões; depois vale a escolha do usuário
 
         self.columnconfigure(0, weight=0)
         self.columnconfigure(1, weight=1)
@@ -97,10 +114,12 @@ class TrainTab(ctk.CTkFrame):
         self.skill.set("Mineração")
         self.name = self._field(reg, "Nome na lista do bot:", 2, ctk.CTkEntry(reg))
         self.target = self._field(reg, "Classe-alvo (o que clicar):", 3, ctk.CTkComboBox(reg, values=[""]))
-        self.model_path = self._field(reg, "Arquivo do modelo:", 4, ctk.CTkEntry(reg))
-        self.xp = self._field(reg, "Indicador de XP (assets/):", 5, ctk.CTkComboBox(reg, values=[NO_XP]))
-        self.drop = self._field(reg, "Item de drop (assets/):", 6, ctk.CTkComboBox(reg, values=[NO_DROP]))
-        self.skill.configure(command=lambda _=None: self._suggest_model_path())
+        self.priority = self._field(reg, "Classes prioritárias:", 4, ctk.CTkEntry(
+            reg, placeholder_text="ex.: Mithril_buff  (opcional; vírgula separa; a 1ª vale mais)"))
+        self.model_path = self._field(reg, "Arquivo do modelo:", 5, ctk.CTkEntry(reg))
+        self.xp = self._field(reg, "Indicador de XP (assets/):", 6, ctk.CTkComboBox(reg, values=[NO_XP]))
+        self.drop = self._field(reg, "Item de drop (assets/):", 7, ctk.CTkComboBox(reg, values=[NO_DROP]))
+        self.skill.configure(command=lambda _=None: self._on_skill_changed())
         self.name.bind("<KeyRelease>", lambda e: self._suggest_model_path())
 
         actions = ctk.CTkFrame(left, fg_color="transparent")
@@ -152,11 +171,30 @@ class TrainTab(ctk.CTkFrame):
             if rel not in xps:
                 xps.append(rel)
         self.xp.configure(values=[NO_XP] + xps)
-        if self.xp.get() not in [NO_XP] + xps:
-            self.xp.set(xps[0] if xps else NO_XP)
+        if not self._assets_initialized or self.xp.get() not in [NO_XP] + xps:
+            # Sem indicador de XP o bot não sabe quando a mineração parou: o padrão é o primeiro disponível
+            self.xp.set(self._preferred_xp(xps))
+        self._assets_initialized = True
         self.drop.configure(values=[NO_DROP] + pngs)
         if self.drop.get() not in [NO_DROP] + pngs:
             self.drop.set(NO_DROP)
+        # Ícone recortado na aba Coletar tem o nome <item>_ore.png: seleciona sozinho se ainda não houver escolha
+        guess = f"{self.app.item}_ore.png" if self.app.item else ""
+        if self.drop.get() == NO_DROP and guess in pngs:
+            self.drop.set(guess)
+
+    def _preferred_xp(self, xps: List[str]) -> str:
+        """Indicador de XP padrão: o já usado pelas atividades da habilidade escolhida (ex.: o de Mineração)."""
+        used = [v["xp_validator"] for v in ACTIVITIES.get(self.skill.get(), {}).values() if v.get("xp_validator")]
+        for candidate in used:
+            if candidate in xps:
+                return candidate
+        return xps[0] if xps else NO_XP
+
+    def _on_skill_changed(self):
+        self._suggest_model_path()
+        xps = [v for v in self.xp.cget("values") if v != NO_XP]
+        self.xp.set(self._preferred_xp(xps))
 
     def _suggest_model_path(self):
         name = ds.sanitize_name(self.name.get() or self.app.item or "item").lower()
@@ -212,6 +250,22 @@ class TrainTab(ctk.CTkFrame):
         target = self.target.get().strip()
         if target not in s["classes"]:
             raise ValueError("Escolha a classe-alvo (o objeto que o bot deve clicar).")
+        by_lower = {c.lower(): c for c in s["classes"]}
+        priority, unknown = [], []
+        for raw in self.priority.get().split(","):
+            name = raw.strip()
+            if not name:
+                continue
+            if name.lower() == target.lower():
+                raise ValueError(f"'{name}' é a classe-alvo; as prioritárias devem ser OUTRAS classes.")
+            if name.lower() in by_lower:
+                if by_lower[name.lower()] not in priority:
+                    priority.append(by_lower[name.lower()])
+            else:
+                unknown.append(name)
+        if unknown:
+            raise ValueError(f"Classe(s) prioritária(s) inexistente(s): {', '.join(unknown)}. "
+                             f"Classes do item: {', '.join(s['classes'])}.")
         model_path = self.model_path.get().strip().replace("\\", "/")
         if not model_path.endswith(".pt") or model_path.startswith("/") or ":" in model_path:
             raise ValueError("O arquivo do modelo deve ser um caminho relativo terminado em .pt (ex.: models/mineracao/mini_iron.pt).")
@@ -224,7 +278,7 @@ class TrainTab(ctk.CTkFrame):
         drop = self.drop.get().strip()
         return {
             "item": item, "target": target, "model_path": model_path, "name": name, "skill": self.skill.get().strip() or "Geral",
-            "xp": "" if xp == NO_XP else xp, "drop": "" if drop == NO_DROP else drop,
+            "xp": "" if xp == NO_XP else xp, "drop": "" if drop == NO_DROP else drop, "priority": priority,
             "base_model": self.base_model.get().strip() or "yolov8n.pt", **params,
         }
 
@@ -281,9 +335,10 @@ class TrainTab(ctk.CTkFrame):
         self.stop_button.configure(state="disabled")
 
     def _register_activity(self, p: Dict):
-        registry.register_activity(p["skill"], p["name"], p["model_path"], p["target"], p["xp"], p["drop"])
+        registry.register_activity(p["skill"], p["name"], p["model_path"], p["target"], p["xp"], p["drop"], p["priority"])
         self.log(f"[REGISTRO] '{p['skill']} > {p['name']}' registrado (alvo: {p['target']}, modelo: {p['model_path']}"
-                 f"{', drop: ' + p['drop'] if p['drop'] else ''}). Reinicie o bot para ver na lista.")
+                 f"{', drop: ' + p['drop'] if p['drop'] else ''}"
+                 f"{', prioridade: ' + ', '.join(p['priority']) if p['priority'] else ''}). Na janela do bot ele aparece sozinho ao voltar para ela (ou no botão ↻ Atualizar alvos).")
 
     # ------------------------------------------------------------------ Colab
 
@@ -291,34 +346,96 @@ class TrainTab(ctk.CTkFrame):
         try:
             p = self._collect()
             split = ds.prepare_split(p["item"])
-            zip_path = ds.make_colab_zip(p["item"])
+            zip_path = os.path.abspath(ds.make_colab_zip(p["item"]))
+            nb_path = os.path.join(os.path.dirname(zip_path), f"treinar_{p['item']}_colab.ipynb")
+            with open(nb_path, "w", encoding="utf-8") as f:
+                f.write(colab.build_notebook(p["item"], imgsz=p["imgsz"], epochs=p["epochs"], batch=p["batch"]))
         except ValueError as e:
             return messagebox.showwarning("Colab", str(e))
         self.log(f"[COLAB] Pacote gerado: {zip_path} ({split['n_train']} treino / {split['n_val']} validação)")
+        self.log(f"[COLAB] Notebook pronto: {nb_path}")
+        self._open_colab_window(p, zip_path, nb_path)
 
+    def _open_colab_window(self, p: Dict, zip_path: str, nb_path: str):
         win = ctk.CTkToplevel(self)
         win.title("Treinar no Google Colab")
-        win.geometry("760x420")
-        box = ctk.CTkTextbox(win, wrap="none")
-        box.pack(fill="both", expand=True, padx=10, pady=(10, 4))
-        box.insert("1.0", COLAB_TEXT.format(zip_name=os.path.basename(zip_path)))
-        ctk.CTkLabel(win, text=f"Arquivo para enviar: {zip_path}", text_color="gray", wraplength=720).pack(padx=10)
+        win.geometry("860x760")
+        steps = COLAB_STEPS.format(notebook=os.path.basename(nb_path), zip_name=os.path.basename(zip_path), item=p["item"])
+        ctk.CTkLabel(win, text=steps, justify="left", anchor="w", wraplength=820).pack(fill="x", padx=16, pady=(14, 6))
+
+        row = ctk.CTkFrame(win, fg_color="transparent")
+        row.pack(pady=4)
+        ctk.CTkButton(row, text="Abrir o Colab", width=150, command=lambda: webbrowser.open(colab.COLAB_URL)).pack(side="left", padx=4)
+        ctk.CTkButton(row, text="Mostrar os arquivos", width=170,
+                      command=lambda: subprocess.Popen(["explorer", "/select,", zip_path])).pack(side="left", padx=4)
+        manual = ctk.CTkTextbox(win, wrap="none", height=190)
 
         def copy():
             self.clipboard_clear()
-            self.clipboard_append(box.get("1.0", "end"))
-        row = ctk.CTkFrame(win, fg_color="transparent")
-        row.pack(pady=8)
-        ctk.CTkButton(row, text="Copiar roteiro", command=copy).pack(side="left", padx=4)
-        ctk.CTkButton(row, text="Abrir a pasta do zip", command=lambda: os.startfile(os.path.dirname(zip_path))).pack(side="left", padx=4)
+            self.clipboard_append(manual.get("1.0", "end"))
+        ctk.CTkButton(row, text="Copiar roteiro manual", width=170, command=copy).pack(side="left", padx=4)
+
+        watch = ctk.CTkFrame(win)
+        watch.pack(fill="x", padx=16, pady=10)
+        ctk.CTkLabel(watch, text="Quando o treino terminar e o .pt for baixado:", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=10, pady=(8, 2))
+        status = ctk.CTkLabel(watch, text=f"Pasta observada: {colab.downloads_dir()}", text_color="gray", wraplength=800, justify="left")
+        status.pack(anchor="w", padx=10)
+        buttons = ctk.CTkFrame(watch, fg_color="transparent")
+        buttons.pack(anchor="w", padx=6, pady=8)
+        ctk.CTkButton(buttons, text="Esperar o .pt → usar como ASSISTENTE", fg_color="#8e44ad", width=300,
+                      command=lambda: self._watch_colab("assistant", status)).pack(side="left", padx=4)
+        ctk.CTkButton(buttons, text="Esperar o .pt → instalar como MODELO FINAL", fg_color="#2c6e49", width=330,
+                      command=lambda: self._watch_colab("final", status)).pack(side="left", padx=4)
+        ctk.CTkButton(buttons, text="Cancelar espera", fg_color="#444444", width=130,
+                      command=self._cancel_watch).pack(side="left", padx=4)
+
+        ctk.CTkLabel(win, text="Alternativa manual (células para colar no Colab):", anchor="w").pack(fill="x", padx=16)
+        manual.pack(fill="both", expand=True, padx=16, pady=(2, 12))
+        manual.insert("1.0", COLAB_TEXT.format(zip_name=os.path.basename(zip_path), imgsz=p["imgsz"], epochs=p["epochs"], batch=p["batch"]))
         win.after(200, win.focus)
 
-    def install_external(self):
+    # ------------------------------------------------------------------ espera do .pt baixado
+
+    def _watch_colab(self, mode: str, status_label):
+        """Observa a pasta Downloads até surgir um .pt novo e então o instala ('assistant' ou 'final')."""
+        if getattr(self, "_watching", False):
+            return messagebox.showinfo("Colab", "Já estou esperando o .pt. Clique em 'Cancelar espera' para recomeçar.")
+        self._watching, self._watch_stop = True, False
+        since, folder = time.time(), colab.downloads_dir()
+        label = "assistente" if mode == "assistant" else "modelo final"
+        status_label.configure(text=f"Esperando um .pt novo em {folder} (será usado como {label})… pode deixar o Colab trabalhando.", text_color="white")
+
+        def work():
+            path = colab.wait_for_new_model(since, folder, lambda: self._watch_stop)
+            self._ui(lambda: self._watch_done(mode, path, status_label))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _cancel_watch(self):
+        self._watch_stop = True
+
+    def _watch_done(self, mode: str, path: Optional[str], status_label):
+        self._watching = False
+        try:
+            status_label.configure(text=(f"Detectado: {path}" if path else "Espera cancelada ou esgotada (nenhum .pt novo apareceu)."),
+                                   text_color="#2ecc71" if path else "#e67e22")
+        except Exception:  # a janela pode já ter sido fechada
+            pass
+        if not path:
+            return
+        self.log(f"[COLAB] .pt detectado: {path}")
+        if mode == "assistant":
+            self.app.annotate_tab.import_assistant(path=path)
+        else:
+            self.install_external(path=path)
+
+    def install_external(self, path: Optional[str] = None):
+        """Instala um .pt treinado fora (ex.: Colab) como modelo final do item e o registra no bot."""
         try:
             p = self._collect()
         except ValueError as e:
             return messagebox.showwarning("Instalar", str(e))
-        source = filedialog.askopenfilename(title="Escolha o best.pt baixado do Colab", filetypes=[("Modelo YOLO", "*.pt")])
+        source = path or filedialog.askopenfilename(title="Escolha o best.pt baixado do Colab", initialdir=colab.downloads_dir(),
+                                                    filetypes=[("Modelo YOLO", "*.pt")])
         if not source or not self._confirm_overwrite(p["model_path"]):
             return
         self.log(f"[INSTALAR] Verificando {source}…")
