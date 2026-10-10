@@ -41,6 +41,25 @@ class InventoryChecker:
         
         return max_val > 0.8
 
+    def get_slots_roi(self, frame: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+        """
+        Retorna (x0, y0, x1, y1) da grade de slots da mochila (coordenadas do frame),
+        derivada da posição da âncora. None se a mochila não estiver aberta.
+        """
+        if self.anchor_template is None:
+            return None
+
+        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        res = cv2.matchTemplate(gray_frame, self.anchor_template, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(res)
+        if max_val <= 0.8:
+            return None
+
+        ax, ay = max_loc
+        h, w = frame.shape[:2]
+        # Grade 7x4 (passo ~43x36 px) logo abaixo/à direita da aba da mochila
+        return (max(ax - 5, 0), max(ay + 22, 0), min(ax + 320, w), min(ay + 175, h))
+
     def is_full(self, frame: np.ndarray) -> bool:
         """
         Checks if there are any empty slots visible in the inventory.

@@ -42,3 +42,8 @@ dataset_raw/
 # OS specific
 .DS_Store
 Thumbs.db
+
+# Treino de modelos
+runs/
+yolov8*.pt
+dataset/

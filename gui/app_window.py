@@ -1,5 +1,8 @@
 import customtkinter as ctk
 import datetime
+import os
+import subprocess
+import sys
 from config.activities import ACTIVITIES
 
 # Configuração global do tema
@@ -10,7 +13,7 @@ class BotInterface:
     def __init__(self, root, start_callback, stop_callback):
         self.root = root
         self.root.title("RS3 VisionBot Engine v2.0")
-        self.root.geometry("550x700")
+        self.root.geometry("550x910")
         self.root.resizable(False, False)
         
         # --- Variáveis de Controle ---
@@ -19,6 +22,11 @@ class BotInterface:
         self.target_var = ctk.StringVar()
         self.model_path_var = ctk.StringVar()
         self.xp_anchor_var = ctk.StringVar()
+        self.drop_item_var = ctk.StringVar()
+        self.use_drop_var = ctk.BooleanVar(value=True)  # Dropa o item quando a mochila enche
+        self.use_reclick_var = ctk.BooleanVar(value=True)   # Reclica na rocha pela barra de stamina
+        self.reclick_pct_var = ctk.StringVar(value="85")
+        self.drop_key_var = ctk.StringVar(value="-")    # Tecla do slot da barra de ações que dropa o item
         
         # Variáveis de Sobrevivência
         self.use_potion_var = ctk.BooleanVar(value=False)
@@ -136,6 +144,43 @@ class BotInterface:
         self.mask_entry = ctk.CTkEntry(mask_group, textvariable=self.mask_key_var, width=60, state="disabled")
         self.mask_entry.grid(row=1, column=1, padx=10, pady=5, sticky="w")
 
+        # ==========================================
+        # SEÇÃO: AUTO-DROP (mochila cheia)
+        # ==========================================
+        drop_group = ctk.CTkFrame(main_frame)
+        drop_group.pack(fill="x", padx=10, pady=5)
+
+        drop_group.columnconfigure(1, weight=1)
+
+        self.drop_checkbox = ctk.CTkCheckBox(
+            drop_group, text="Auto-Drop (esvaziar a mochila ao encher)",
+            variable=self.use_drop_var,
+            font=ctk.CTkFont(weight="bold"),
+            fg_color="#9b59b6"
+        )
+        self.drop_checkbox.grid(row=0, column=0, columnspan=2, padx=10, pady=(10, 5), sticky="w")
+
+        ctk.CTkLabel(drop_group, text="Hotkey Drop (barra de ações):", text_color="gray").grid(row=1, column=0, padx=(20, 5), pady=(0, 10), sticky="w")
+        self.drop_entry = ctk.CTkEntry(drop_group, textvariable=self.drop_key_var, width=60)
+        self.drop_entry.grid(row=1, column=1, padx=10, pady=(0, 10), sticky="w")
+
+        # ==========================================
+        # SEÇÃO: RECLIQUE (barra de stamina da mineração)
+        # ==========================================
+        reclick_group = ctk.CTkFrame(main_frame)
+        reclick_group.pack(fill="x", padx=10, pady=5)
+
+        self.reclick_checkbox = ctk.CTkCheckBox(
+            reclick_group, text="Reclicar na rocha quando a barra passar de",
+            variable=self.use_reclick_var,
+            font=ctk.CTkFont(weight="bold"),
+            fg_color="#1abc9c"
+        )
+        self.reclick_checkbox.pack(side="left", padx=(10, 6), pady=10)
+        self.reclick_entry = ctk.CTkEntry(reclick_group, textvariable=self.reclick_pct_var, width=50)
+        self.reclick_entry.pack(side="left")
+        ctk.CTkLabel(reclick_group, text="%", text_color="gray").pack(side="left", padx=(4, 0))
+
         # --- Botões ---
         button_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
         button_frame.pack(pady=10)
@@ -146,11 +191,23 @@ class BotInterface:
         self.btn_stop = ctk.CTkButton(button_frame, text="STOP BOT", fg_color="#e74c3c", command=stop_cmd, font=ctk.CTkFont(weight="bold"))
         self.btn_stop.pack(side="left", padx=10)
 
+        self.btn_trainer = ctk.CTkButton(button_frame, text="TREINADOR", fg_color="#3498db", command=self._open_trainer, font=ctk.CTkFont(weight="bold"))
+        self.btn_trainer.pack(side="left", padx=10)
+
         # --- Logs ---
         self.log_area = ctk.CTkTextbox(main_frame, state='disabled', height=150)
         self.log_area.pack(fill="both", expand=True, padx=10, pady=10)
 
     # --- Lógica de Interface ---
+
+    def _open_trainer(self):
+        """Abre o Treinador (coletar, anotar, treinar e registrar alvos) em outra janela/processo."""
+        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        try:
+            subprocess.Popen([sys.executable, os.path.join(root_dir, "trainer_main.py")], cwd=root_dir)
+            self.log("[TREINADOR] Abrindo... (depois de treinar um novo alvo, reinicie o bot para vê-lo na lista)")
+        except Exception as e:
+            self.log(f"[ERRO] Não foi possível abrir o Treinador: {e}")
 
     def _toggle_yolo_fields(self):
         """Habilita ou desabilita os seletores de IA."""
@@ -182,6 +239,7 @@ class BotInterface:
             config = ACTIVITIES[skill][target]
             self.model_path_var.set(config["model"])
             self.xp_anchor_var.set(config["xp_validator"])
+            self.drop_item_var.set(config.get("drop_item", ""))
 
     def _set_default_values(self):
         if ACTIVITIES:

@@ -1,3 +1,4 @@
+import os
 import tkinter as tk
 import time
 import threading
@@ -10,6 +11,8 @@ from actuators.mouse import MouseActuator
 from actuators.keyboard import KeyboardActuator
 from engine.state_seeker import TargetSeekerFSM
 from engine.survival_manager import SurvivalManager
+from engine.drop_module import InventoryDropper
+from vision.stamina import StaminaBarReader
 
 class BotController:
     def __init__(self):
@@ -30,8 +33,9 @@ class BotController:
     def _initialize_core_modules(self):
         """Instancia os componentes que não mudam durante a execução."""
         self.capture = ScreenCapture(window_title="RuneScape")
-        self.mouse = MouseActuator()
-        self.keyboard = KeyboardActuator()
+        # Os atuadores garantem o foco na janela do jogo antes de cada ação
+        self.mouse = MouseActuator(focus_callback=self._ensure_game_focus)
+        self.keyboard = KeyboardActuator(focus_callback=self._ensure_game_focus)
         self.detector = Detector(model_path=None)
         
         # Gerenciador de Sobrevivência Modular
@@ -43,6 +47,16 @@ class BotController:
             empty_slot_path="assets/slot_vazio_mochila.png"
         )
 
+        # Esvaziamento da mochila (shift-click) quando enche
+        self.dropper = InventoryDropper(
+            inventory_checker=self.inventory_checker,
+            mouse=self.mouse,
+            keyboard=self.keyboard,
+            screencap=self.capture,
+            logger_func=self.gui.log,
+            focus_callback=self._ensure_game_focus,
+        )
+
         # Máquina de Estados (FSM)
         self.fsm = TargetSeekerFSM(
             inventory_checker=self.inventory_checker,
@@ -50,8 +64,20 @@ class BotController:
             mouse=self.mouse,
             keyboard=self.keyboard,
             screencap=self.capture,
-            logger_func=self.gui.log
+            logger_func=self.gui.log,
+            dropper=self.dropper,
+            stamina_reader=StaminaBarReader()
         )
+
+    def _ensure_game_focus(self) -> bool:
+        """Traz o RuneScape para o primeiro plano; loga só quando precisou agir."""
+        if self.capture.is_focused():
+            return True
+        if self.capture.focus():
+            self.gui.log("[FOCO] Janela do jogo trazida para o primeiro plano.")
+            return True
+        self.gui.log("[FOCO] Não foi possível focar a janela do jogo!")
+        return False
 
     def _configure_session(self):
         """Lê os dados da GUI e configura os serviços para o 'Play'."""
@@ -81,7 +107,17 @@ class BotController:
         )
         # Configura IA (YOLO)
         has_ia_active = use_ia and all([model_path, target, skill])
+        self.dropper.configure(
+            enabled=has_ia_active and self.gui.use_drop_var.get(),
+            item_image=self.gui.drop_item_var.get().strip(),
+            hotkey=self.gui.drop_key_var.get().strip(),
+        )
         if has_ia_active:
+            if not os.path.exists(model_path):
+                raise RuntimeError(
+                    f"Modelo não encontrado: {model_path}. Treine/adicione o .pt para este alvo "
+                    "ou desmarque a IA."
+                )
             if not self.detector.update_model(model_path):
                 raise RuntimeError("Erro ao carregar modelo .pt")
             self.fsm.setup_session(target_class=target, validator_name=self.gui.xp_anchor_var.get())
@@ -91,6 +127,16 @@ class BotController:
                 self.gui.log("[MODO] IA Desativada pelo usuário.")
             self.gui.log("[MODO] Serviços de suporte ativos conforme seleção.")
 
+        # Reclique na rocha conforme a barra de stamina da mineração
+        try:
+            pct = min(max(int(self.gui.reclick_pct_var.get().strip().rstrip("%")), 30), 100)
+        except ValueError:
+            pct = 85
+        self.fsm.reclick_enabled = bool(has_ia_active and self.gui.use_reclick_var.get())
+        self.fsm.reclick_threshold = pct / 100
+        if self.fsm.reclick_enabled:
+            self.gui.log(f"[STAMINA] Reclique ativo: reclica na rocha quando a barra passar de {pct}%.")
+
         return has_ia_active
 
     def start(self):
@@ -99,7 +145,10 @@ class BotController:
 
         try:
             has_ia = self._configure_session()
-            
+
+            if not self._ensure_game_focus():
+                raise RuntimeError("Janela do RuneScape não encontrada ou não pôde ser focada.")
+
             self.is_running = True
             self.bot_thread = threading.Thread(target=self._bot_loop, daemon=True)
             self.bot_thread.start()
@@ -129,7 +178,8 @@ class BotController:
                 self.fsm.update(frame)
                 self._update_state_log()
 
-            time.sleep(0.1)
+            # Durante o drop o ciclo é mais curto para os toques saírem no ritmo configurado
+            time.sleep(0.03 if self.fsm.state == "DROPANDO" else 0.1)
 
     def _update_state_log(self):
         """Monitora e loga mudanças de estado da FSM."""
