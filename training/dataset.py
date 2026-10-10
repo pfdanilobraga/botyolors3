@@ -16,6 +16,8 @@ import shutil
 import zipfile
 from typing import Dict, List, Optional, Tuple
 
+import cv2
+import numpy as np
 import yaml
 
 DATASET_ROOT = "dataset"
@@ -153,6 +155,49 @@ def stats(item: str) -> Dict:
         "total": len(images), "annotated": annotated, "negatives": negatives,
         "boxes": boxes_total, "per_class": per_class, "classes": classes,
     }
+
+
+# ------------------------------------------------------------------ variedade (o que anotar a seguir)
+
+def _thumbnail(item: str, name: str) -> Optional[np.ndarray]:
+    """Miniatura 48x27 colorida da imagem (em cache na pasta thumbs/), para comparar imagens."""
+    src = os.path.join(images_dir(item), name)
+    folder = os.path.join(dataset_dir(item), "thumbs")
+    path = os.path.join(folder, os.path.splitext(name)[0] + ".png")
+    if os.path.isfile(path) and os.path.getmtime(path) >= os.path.getmtime(src):
+        thumb = cv2.imread(path)
+    else:
+        image = cv2.imread(src)
+        if image is None:
+            return None
+        thumb = cv2.resize(image, (48, 27), interpolation=cv2.INTER_AREA)
+        os.makedirs(folder, exist_ok=True)
+        cv2.imwrite(path, thumb)
+    return None if thumb is None else thumb.astype(np.float32)
+
+
+def most_different_unlabeled(item: str) -> Optional[str]:
+    """
+    Imagem ainda sem rótulo que mais se parece COM MENOS das já anotadas (a mais "diferente"): anotá-la
+    ensina mais ao modelo do que mais uma imagem parecida com as que já foram marcadas.
+    """
+    unlabeled, annotated = [], []
+    for name in list_images(item):
+        (annotated if read_labels(item, name) is not None else unlabeled).append(name)
+    if not unlabeled:
+        return None
+    ref = [t for t in (_thumbnail(item, n) for n in annotated) if t is not None]
+    if not ref:
+        return unlabeled[0]
+    best_name, best_dist = unlabeled[0], -1.0
+    for name in unlabeled:
+        thumb = _thumbnail(item, name)
+        if thumb is None:
+            continue
+        dist = min(float(np.abs(thumb - r).mean()) for r in ref)
+        if dist > best_dist:
+            best_name, best_dist = name, dist
+    return best_name
 
 
 # ------------------------------------------------------------------ divisão treino/validação

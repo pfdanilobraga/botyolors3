@@ -120,9 +120,12 @@ class BotController:
                 )
             if not self.detector.update_model(model_path):
                 raise RuntimeError("Erro ao carregar modelo .pt")
-            self.fsm.setup_session(target_class=target, validator_name=self.gui.xp_anchor_var.get())
+            priority = [c.strip() for c in self.gui.priority_var.get().split(",") if c.strip()]
+            self.fsm.setup_session(target_class=target, validator_name=self.gui.xp_anchor_var.get(),
+                                   priority_classes=priority)
         else:
             self.fsm.target_class = None
+            self.fsm.priority_classes = []
             if not use_ia:
                 self.gui.log("[MODO] IA Desativada pelo usuário.")
             self.gui.log("[MODO] Serviços de suporte ativos conforme seleção.")

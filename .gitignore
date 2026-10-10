@@ -47,3 +47,4 @@ Thumbs.db
 runs/
 yolov8*.pt
 dataset/
+debug/

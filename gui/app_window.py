@@ -3,7 +3,7 @@ import datetime
 import os
 import subprocess
 import sys
-from config.activities import ACTIVITIES
+from config.activities import ACTIVITIES, custom_mtime, reload_activities
 
 # Configuração global do tema
 ctk.set_appearance_mode("Dark")
@@ -13,7 +13,7 @@ class BotInterface:
     def __init__(self, root, start_callback, stop_callback):
         self.root = root
         self.root.title("RS3 VisionBot Engine v2.0")
-        self.root.geometry("550x910")
+        self.root.geometry("550x950")
         self.root.resizable(False, False)
         
         # --- Variáveis de Controle ---
@@ -23,6 +23,7 @@ class BotInterface:
         self.model_path_var = ctk.StringVar()
         self.xp_anchor_var = ctk.StringVar()
         self.drop_item_var = ctk.StringVar()
+        self.priority_var = ctk.StringVar()      # classes prioritárias do alvo, separadas por vírgula
         self.use_drop_var = ctk.BooleanVar(value=True)  # Dropa o item quando a mochila enche
         self.use_reclick_var = ctk.BooleanVar(value=True)   # Reclica na rocha pela barra de stamina
         self.reclick_pct_var = ctk.StringVar(value="85")
@@ -38,8 +39,11 @@ class BotInterface:
         self.use_mask_var = ctk.BooleanVar(value=False)
         self.mask_key_var = ctk.StringVar(value="1")
 
+        self._custom_mtime = custom_mtime()
         self._setup_widgets(start_callback, stop_callback)
         self._set_default_values()
+        # Ao voltar para esta janela, confere se o Treinador registrou alvos novos
+        self.root.bind("<FocusIn>", self._maybe_auto_refresh)
 
     def _setup_widgets(self, start_cmd, stop_cmd):
         main_frame = ctk.CTkFrame(self.root)
@@ -83,6 +87,11 @@ class BotInterface:
         ctk.CTkLabel(self.ia_config_frame, text="Modelo (.pt):", text_color="gray").grid(row=2, column=0, sticky="w", pady=5, padx=10)
         self.model_entry = ctk.CTkEntry(self.ia_config_frame, textvariable=self.model_path_var, state="disabled")
         self.model_entry.grid(row=2, column=1, sticky="ew", pady=5, padx=10)
+
+        # Atualizar a lista de alvos (modelos novos registrados pelo Treinador), sem reiniciar o bot
+        self.btn_refresh = ctk.CTkButton(self.ia_config_frame, text="↻ Atualizar alvos (novos do Treinador)",
+                                         fg_color="#16a085", hover_color="#1abc9c", command=self.refresh_activities)
+        self.btn_refresh.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(2, 8), padx=10)
 
        # ==========================================
         # SEÇÃO: SOBREVIVÊNCIA (POTION)
@@ -205,7 +214,7 @@ class BotInterface:
         root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         try:
             subprocess.Popen([sys.executable, os.path.join(root_dir, "trainer_main.py")], cwd=root_dir)
-            self.log("[TREINADOR] Abrindo... (depois de treinar um novo alvo, reinicie o bot para vê-lo na lista)")
+            self.log("[TREINADOR] Abrindo... (alvos novos aparecem aqui ao voltar para esta janela, ou no botão ↻ Atualizar alvos)")
         except Exception as e:
             self.log(f"[ERRO] Não foi possível abrir o Treinador: {e}")
 
@@ -240,6 +249,43 @@ class BotInterface:
             self.model_path_var.set(config["model"])
             self.xp_anchor_var.set(config["xp_validator"])
             self.drop_item_var.set(config.get("drop_item", ""))
+            self.priority_var.set(", ".join(config.get("priority_targets", [])))
+
+    def refresh_activities(self, auto: bool = False):
+        """Relê os alvos (inclui os que o Treinador acabou de registrar) mantendo a seleção atual."""
+        before = {(skill, target) for skill, items in ACTIVITIES.items() for target in items}
+        skill, target = self.skill_var.get(), self.target_var.get()
+        reload_activities()
+        self._custom_mtime = custom_mtime()
+        if not ACTIVITIES:
+            return
+        skills = list(ACTIVITIES.keys())
+        self.skill_combo.configure(values=skills)
+        if skill not in ACTIVITIES:
+            skill = skills[0]
+            target = ""
+        self.skill_var.set(skill)
+        targets = list(ACTIVITIES[skill].keys())
+        self.target_combo.configure(values=targets)
+        self.target_var.set(target if target in targets else targets[0])
+        self._on_target_change()
+
+        after = {(sk, tg) for sk, items in ACTIVITIES.items() for tg in items}
+        new = sorted(f"{sk} > {tg}" for sk, tg in after - before)
+        gone = sorted(f"{sk} > {tg}" for sk, tg in before - after)
+        prefix = "[ATUALIZAR] " + ("(automático) " if auto else "")
+        if new or gone:
+            self.log(prefix + "Alvos atualizados." + (f" Novos: {', '.join(new)}." if new else "")
+                     + (f" Removidos: {', '.join(gone)}." if gone else ""))
+        elif not auto:
+            self.log(prefix + "Nenhum alvo novo.")
+
+    def _maybe_auto_refresh(self, event=None):
+        """Quando esta janela recebe o foco, atualiza os alvos se o arquivo do Treinador mudou."""
+        if event is not None and event.widget is not self.root:
+            return
+        if custom_mtime() != self._custom_mtime:
+            self.refresh_activities(auto=True)
 
     def _set_default_values(self):
         if ACTIVITIES:

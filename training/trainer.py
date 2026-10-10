@@ -86,9 +86,11 @@ def run_training(
     on_progress: Optional[Callable[[float, str], None]] = None,
     on_log: Optional[Callable[[str], None]] = None,
     should_stop: Optional[Callable[[], bool]] = None,
+    train_kwargs: Optional[Dict] = None,
 ) -> Dict:
     """
     Treina e instala o melhor modelo em out_path.
+    train_kwargs: parâmetros extras repassados ao ultralytics (ex.: freeze, warmup_epochs).
 
     on_progress(fração 0-1, texto) é chamado durante o treino; should_stop() é consultado a cada lote.
     Retorna {"status": "done"|"stopped", "path": out_path|None, "names": {...}|None, "checkpoint": caminho|None}.
@@ -161,7 +163,7 @@ def run_training(
         yolo.train(
             data=local_yaml, imgsz=imgsz, epochs=epochs, batch=batch, patience=patience, device=device,
             project=os.path.abspath(os.path.join("runs", "train")), name=run_name, exist_ok=True,
-            plots=False,
+            plots=False, **(train_kwargs or {}),
         )
     except TrainingStopped:
         status = "stopped"
