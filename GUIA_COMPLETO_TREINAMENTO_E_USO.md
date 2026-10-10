@@ -109,6 +109,15 @@ Com os templates de UI (`assets/`) criados e o "cérebro" de visão 3D (`models/
 
 4. **Para interromper o bot**, volte ao terminal e pressione `Ctrl + C`.
 
+### 6.1. Sessão & Metas (painel à direita da janela do bot)
+
+* **Tempo de bot:** `h` e `min`. Ao acabar, o bot para sozinho e avisa. `0 h 0 min` = sem limite.
+* **Nível atual / XP atual (opcional) / Meta (nível):** informe o nível (ou o XP exato) em que você está e o nível que quer atingir. O bot mostra nível estimado, XP ganho, faltam, XP/hora, previsão de chegada na meta e uma barra de progresso.
+* **XP por item:** quanto XP cada minério dá (já vem preenchido para Copper 17,5, Iron 35 e Mithril 80; ajuste se tiver bônus de roupa/evento). É salvo por alvo.
+* **Como o XP é calculado:** o bot **não lê** o nível do jogo. Ele conta os minérios que entram na mochila (pelo ícone do item, o mesmo do Auto-drop, que precisa estar em `assets/`) e multiplica pelo XP por item. É uma **estimativa**; quando o jogo mostrar um nível/XP diferente, digite os valores reais e clique **Corrigir nível/XP agora** (vale na hora, com o bot rodando).
+* **Ao atingir a meta (ou o tempo):** som, o botão do bot pisca na barra de tarefas e abre uma janela de aviso. Com **Parar o bot ao atingir a meta** marcado (padrão) o bot para; desmarcado, ele só avisa e continua. Cada subida de nível estimada também toca um som curto e aparece no log.
+* **Continuidade:** ao parar (manualmente, por meta ou por tempo) o nível/XP estimados ficam salvos em `config/progress.json` e a próxima sessão já começa deles. Depois de atingir a meta, defina uma nova meta maior antes de iniciar de novo.
+
 ---
 
 ## FASE 7: Entendendo a Arquitetura Lógica (Para futuras edições)

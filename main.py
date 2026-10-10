@@ -12,6 +12,8 @@ from actuators.keyboard import KeyboardActuator
 from engine.state_seeker import TargetSeekerFSM
 from engine.survival_manager import SurvivalManager
 from engine.drop_module import InventoryDropper
+from engine.session import ItemGainTracker, SessionMonitor, format_duration, format_number
+from engine.skill_goals import ProgressStore, SkillGoal, xp_for_level
 from vision.stamina import StaminaBarReader
 
 class BotController:
@@ -19,6 +21,8 @@ class BotController:
         # 1. Configurações de Estado
         self.is_running = False
         self.last_state = "IDLE"
+        self._goal_skill = ""
+        self._goal_target = ""
 
         # 2. Inicialização da GUI
         self.root = tk.Tk()
@@ -27,6 +31,12 @@ class BotController:
 
         # 3. Instanciação dos Módulos (Core)
         self._initialize_core_modules()
+
+        # 4. Sessão: tempo limite, XP/nível estimados e meta
+        self.session = SessionMonitor()
+        self.progress = ProgressStore()
+        self.gain_tracker = ItemGainTracker(self.inventory_checker)
+        self.gui.bind_session(self.session.snapshot, self.sync_progress)
         
         self.gui.log("[SYSTEM] Bot pronto para configuração.")
 
@@ -140,7 +150,41 @@ class BotController:
         if self.fsm.reclick_enabled:
             self.gui.log(f"[STAMINA] Reclique ativo: reclica na rocha quando a barra passar de {pct}%.")
 
+        self._configure_goals(has_ia_active)
         return has_ia_active
+
+    def _configure_goals(self, has_ia_active: bool):
+        """Tempo limite + acompanhamento de nível/meta, a partir do painel Sessão & Metas."""
+        settings = self.gui.session_panel.read()
+        skill, target = self.gui.skill_var.get(), self.gui.target_var.get()
+        self._goal_skill, self._goal_target = skill, target
+
+        goal = None
+        if settings.level is not None:
+            start_xp = settings.xp if settings.xp is not None else xp_for_level(settings.level)
+            goal = SkillGoal(skill, start_xp, settings.xp_per_item, settings.target_level)
+            if settings.xp_per_item > 0:
+                self.progress.save_xp_per_item(skill, target, settings.xp_per_item)
+
+        self.session.configure(settings.duration_s, goal, settings.stop_on_goal)
+
+        # Os itens são contados pelo ícone do minério (o mesmo do Auto-drop), mesmo com o drop desligado
+        counting = False
+        if goal and has_ia_active:
+            counting = self.gain_tracker.configure(self.gui.drop_item_var.get().strip())
+        else:
+            self.gain_tracker.configure(None)
+
+        if settings.duration_s > 0:
+            self.gui.log(f"[SESSÃO] Tempo de bot: {format_duration(settings.duration_s)}.")
+        if goal:
+            meta = f", meta: nível {goal.target_level}" if goal.target_level else ""
+            self.gui.log(f"[SESSÃO] {skill}: nível {goal.level} ({goal.xp:,.0f} XP){meta}.".replace(",", "."))
+            if not counting:
+                self.gui.log("[SESSÃO] Sem ícone do item (ou IA desligada): o XP não será estimado sozinho. "
+                             "Use 'Corrigir nível/XP agora' para atualizar à mão.")
+            elif goal.xp_per_item <= 0:
+                self.gui.log("[SESSÃO] Informe o 'XP por item' para o bot estimar o XP ganho.")
 
     def start(self):
         """Valida e inicia a thread do motor."""
@@ -153,6 +197,7 @@ class BotController:
                 raise RuntimeError("Janela do RuneScape não encontrada ou não pôde ser focada.")
 
             self.is_running = True
+            self.session.start()
             self.bot_thread = threading.Thread(target=self._bot_loop, daemon=True)
             self.bot_thread.start()
             
@@ -166,23 +211,74 @@ class BotController:
 
     def _bot_loop(self):
         """Loop principal de processamento."""
-        while self.is_running:
-            frame = self.capture.get_frame()
-            if frame is None: 
-                self.gui.log("[ERRO VISÃO] Janela do jogo não detectada!")
-                time.sleep(2)
-                continue
+        try:
+            while self.is_running:
+                # Tempo limite e meta valem mesmo se a janela do jogo sumir
+                self._handle_session_events(self.session.update())
+                if not self.is_running:
+                    break
 
-            # 1. Prioridade: Sobrevivência (Sempre roda se configurado)
-            self.survival_manager.update_all(frame)
+                frame = self.capture.get_frame()
+                if frame is None: 
+                    self.gui.log("[ERRO VISÃO] Janela do jogo não detectada!")
+                    time.sleep(2)
+                    continue
 
-            # 2. Lógica de Atividade (FSM) - Só roda se houver alvo
-            if self.fsm.target_class:
-                self.fsm.update(frame)
-                self._update_state_log()
+                # 1. Prioridade: Sobrevivência (Sempre roda se configurado)
+                self.survival_manager.update_all(frame)
 
-            # Durante o drop o ciclo é mais curto para os toques saírem no ritmo configurado
-            time.sleep(0.03 if self.fsm.state == "DROPANDO" else 0.1)
+                # 2. Lógica de Atividade (FSM) - Só roda se houver alvo
+                if self.fsm.target_class:
+                    self.fsm.update(frame)
+                    self._update_state_log()
+
+                    gained = self.gain_tracker.update(frame, self.fsm.state)
+                    if gained:
+                        self.session.add_items(gained)
+
+                # Durante o drop o ciclo é mais curto para os toques saírem no ritmo configurado
+                time.sleep(0.03 if self.fsm.state == "DROPANDO" else 0.1)
+        finally:
+            if threading.current_thread() is getattr(self, "bot_thread", None):
+                self.is_running = False  # laço terminou (parada, meta, tempo ou erro): libera o Start
+            self._finish_session()
+
+    def _handle_session_events(self, events):
+        """Registra e avisa (som/popup) subidas de nível, meta atingida e fim do tempo; para o bot se pedido."""
+        for event in events:
+            self.gui.log(f"[SESSÃO] {event.message}")
+            self.gui.post_event(event)
+            if event.stop:
+                self.is_running = False
+
+    def _finish_session(self):
+        """Salva o nível/XP estimados (a próxima sessão continua daí) e registra o resumo."""
+        goal = self.session.goal
+        if goal:
+            try:
+                self.progress.save_skill(self._goal_skill, goal.xp, goal.target_level)
+            except OSError as e:
+                self.gui.log(f"[SESSÃO] Não foi possível salvar o progresso: {e}")
+        summary = self.session.finish()
+        if summary:
+            self.gui.log(f"[SESSÃO] {summary}")
+
+    def sync_progress(self):
+        """Botão 'Corrigir nível/XP agora': aplica o nível/XP digitados à sessão em andamento."""
+        try:
+            settings = self.gui.session_panel.read()
+        except ValueError as e:
+            self.gui.log(f"[SESSÃO] {e}")
+            return
+        goal = self.session.goal
+        if settings.level is None:
+            self.gui.log("[SESSÃO] Informe o nível (ou o XP) atual para corrigir.")
+        elif not (self.is_running and goal):
+            self.gui.log("[SESSÃO] Sem sessão em andamento: o nível/XP digitados valem a partir do próximo Start.")
+        else:
+            xp = settings.xp if settings.xp is not None else xp_for_level(settings.level)
+            self.session.sync(xp)
+            self.gui.log(f"[SESSÃO] XP corrigido para {format_number(xp)} (nível {goal.level}).")
 
     def _update_state_log(self):
         """Monitora e loga mudanças de estado da FSM."""

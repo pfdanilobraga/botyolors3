@@ -115,28 +115,9 @@ class InventoryDropper:
         Centros (x, y), em coordenadas do frame, dos slots da mochila com o item,
         em ordem de leitura (linha a linha). None se a mochila não estiver visível.
         """
-        roi = self.inventory.get_slots_roi(frame)
-        if roi is None or self.template is None:
+        if self.template is None:
             return None
-
-        x0, y0, x1, y1 = roi
-        region = frame[y0:y1, x0:x1]
-        th, tw = self.template.shape[:2]
-        if region.shape[0] < th or region.shape[1] < tw:
-            return None
-
-        result = cv2.matchTemplate(region, self.template, cv2.TM_CCOEFF_NORMED)
-        ys, xs = np.where(result >= self.MATCH_THRESHOLD)
-
-        # Supressão de não-máximos: mantém só o melhor pico de cada slot
-        peaks = sorted(zip(xs.tolist(), ys.tolist()), key=lambda p: -result[p[1], p[0]])
-        kept = []
-        for x, y in peaks:
-            if all(abs(x - kx) > self.MIN_SLOT_DISTANCE or abs(y - ky) > self.MIN_SLOT_DISTANCE for kx, ky in kept):
-                kept.append((x, y))
-
-        centers = [(x0 + x + tw // 2, y0 + y + th // 2) for x, y in kept]
-        return sorted(centers, key=lambda c: (round(c[1] / 20), c[0]))
+        return self.inventory.find_item_slots(frame, self.template, self.MATCH_THRESHOLD, self.MIN_SLOT_DISTANCE)
 
     def step(self, frame: np.ndarray) -> str:
         """Executa no máximo um clique. Retorna WORKING, DONE ou FAILED."""

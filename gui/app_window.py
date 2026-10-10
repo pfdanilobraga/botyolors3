@@ -1,9 +1,13 @@
 import customtkinter as ctk
 import datetime
 import os
+import queue
 import subprocess
 import sys
 from config.activities import ACTIVITIES, custom_mtime, reload_activities
+from engine.skill_goals import ProgressStore
+from gui import alerts
+from gui.session_panel import SessionPanel
 
 # Configuração global do tema
 ctk.set_appearance_mode("Dark")
@@ -13,9 +17,15 @@ class BotInterface:
     def __init__(self, root, start_callback, stop_callback):
         self.root = root
         self.root.title("RS3 VisionBot Engine v2.0")
-        self.root.geometry("550x950")
+        self.root.geometry("1010x950")
         self.root.resizable(False, False)
-        
+
+        # Sessão & Metas: o motor (outra thread) manda avisos por esta fila e a tela os consome em _poll
+        self._events = queue.Queue()
+        self._snapshot_provider = None
+        self._on_sync = None
+        self._was_running = False
+
         # --- Variáveis de Controle ---
         self.use_yolo_var = ctk.BooleanVar(value=True) # Controla se a IA está ativa
         self.skill_var = ctk.StringVar()
@@ -44,10 +54,14 @@ class BotInterface:
         self._set_default_values()
         # Ao voltar para esta janela, confere se o Treinador registrou alvos novos
         self.root.bind("<FocusIn>", self._maybe_auto_refresh)
+        self._poll()
 
     def _setup_widgets(self, start_cmd, stop_cmd):
-        main_frame = ctk.CTkFrame(self.root)
-        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
+        main_frame = ctk.CTkFrame(self.root, width=550)
+        main_frame.pack(side="left", fill="both", expand=True, padx=(20, 10), pady=20)
+
+        self.session_panel = SessionPanel(self.root, ProgressStore(), on_sync=self._sync_clicked)
+        self.session_panel.pack(side="right", fill="y", padx=(0, 20), pady=20)
 
         title_label = ctk.CTkLabel(main_frame, text="Configurações do Bot", font=ctk.CTkFont(size=20, weight="bold"))
         title_label.pack(pady=(10, 10))
@@ -250,6 +264,7 @@ class BotInterface:
             self.xp_anchor_var.set(config["xp_validator"])
             self.drop_item_var.set(config.get("drop_item", ""))
             self.priority_var.set(", ".join(config.get("priority_targets", [])))
+            self.session_panel.set_context(skill, target)
 
     def refresh_activities(self, auto: bool = False):
         """Relê os alvos (inclui os que o Treinador acabou de registrar) mantendo a seleção atual."""
@@ -299,5 +314,36 @@ class BotInterface:
         self.log_area.insert("end", f"[{timestamp}] {message}\n")
         self.log_area.see("end")
         self.log_area.configure(state='disabled')
+
+    # --- Sessão & Metas ---
+
+    def bind_session(self, snapshot_provider, on_sync):
+        """snapshot_provider(): estado da sessão para o painel; on_sync(): aplica o nível/XP digitados à sessão."""
+        self._snapshot_provider = snapshot_provider
+        self._on_sync = on_sync
+
+    def post_event(self, event):
+        """Pede um aviso (SessionEvent). Pode ser chamado de qualquer thread."""
+        self._events.put(event)
+
+    def _sync_clicked(self):
+        if self._on_sync:
+            self._on_sync()
+
+    def _poll(self):
+        """Atualiza o painel e mostra os avisos pendentes (sempre na thread da tela)."""
+        try:
+            snap = self._snapshot_provider() if self._snapshot_provider else None
+            self.session_panel.render(snap)
+            running = bool(snap and snap["running"])
+            if self._was_running and not running and snap and snap.get("goal"):
+                self.session_panel.load_progress()  # sessão terminou: o nível/XP salvos viram o ponto de partida
+            self._was_running = running
+
+            while not self._events.empty():
+                event = self._events.get_nowait()
+                alerts.notify(self.root, event.kind, event.title, event.message)
+        finally:
+            self.root.after(500, self._poll)
 
   

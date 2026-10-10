@@ -48,3 +48,7 @@ runs/
 yolov8*.pt
 dataset/
 debug/
+
+# Progresso pessoal (nível/XP estimados, metas) — gerado pelo bot
+config/progress.json
+config/progress.json.tmp
