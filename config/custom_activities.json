@@ -1,0 +1,10 @@
+{
+  "Mineração": {
+    "Iron": {
+      "model": "models/mineracao/mini_iron.pt",
+      "target": "Iron_rock",
+      "xp_validator": "indicadores/xp_mineracao.png",
+      "drop_item": "iron_ore.png"
+    }
+  }
+}

@@ -1,71 +1,201 @@
-import time
-import cv2
-import sys
 import os
+import tkinter as tk
+import time
+import threading
 
-# Ensure the project root is in sys.path
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
+from gui.app_window import BotInterface
 from vision.capture import ScreenCapture
+from vision.inventory import InventoryChecker
 from vision.detector import Detector
 from actuators.mouse import MouseActuator
 from actuators.keyboard import KeyboardActuator
-from engine.state_mining import MiningFSM
+from engine.state_seeker import TargetSeekerFSM
+from engine.survival_manager import SurvivalManager
+from engine.drop_module import InventoryDropper
+from vision.stamina import StaminaBarReader
 
-def run_bot():
-    """
-    Main orchestrator for the RS3 VisionBot.
-    Captures real frames and feeds them into the State Machine.
-    """
-    print("\n" + "="*50)
-    print("RS3 VisionBot Engine v2.0 - LIVE MODE")
-    print("="*50)
-    
-    # 1. Initialize Components
-    # Game window must be named "RuneScape"
-    cap = ScreenCapture(window_title="RuneScape")
-    
-    # Initialize Vision and Actuators
-    print("[Info] Carregando modelos e periféricos...")
-    detector = Detector(model_path="models/best_rs3.pt")
-    mouse = MouseActuator()
-    keyboard = KeyboardActuator()
-    
-    # Initialize FSM with all modules
-    fsm = MiningFSM(
-        detector=detector,
-        mouse=mouse,
-        keyboard=keyboard,
-        screencap=cap,
-        target_class="Copper_rock" # Adjust if your YOLO class is different
-    )
-    
-    print("\n[Status] Bot pronto e integrado!")
-    print("[Instrução] Garanta que o RuneScape está visível e não minimizado.")
-    print("[Controle] Pressione 'Ctrl + C' no terminal para parar o bot.\n")
+class BotController:
+    def __init__(self):
+        # 1. Configurações de Estado
+        self.is_running = False
+        self.last_state = "IDLE"
 
-    try:
-        while True:
-            # 2. Capture Real Frame
-            frame = cap.get_frame()
+        # 2. Inicialização da GUI
+        self.root = tk.Tk()
+        self.gui = BotInterface(self.root, self.start, self.stop)
+        self.gui.log("[SYSTEM] Inicializando Sensores e Atuadores...")
+
+        # 3. Instanciação dos Módulos (Core)
+        self._initialize_core_modules()
+        
+        self.gui.log("[SYSTEM] Bot pronto para configuração.")
+
+    def _initialize_core_modules(self):
+        """Instancia os componentes que não mudam durante a execução."""
+        self.capture = ScreenCapture(window_title="RuneScape")
+        # Os atuadores garantem o foco na janela do jogo antes de cada ação
+        self.mouse = MouseActuator(focus_callback=self._ensure_game_focus)
+        self.keyboard = KeyboardActuator(focus_callback=self._ensure_game_focus)
+        self.detector = Detector(model_path=None)
+        
+        # Gerenciador de Sobrevivência Modular
+        self.survival_manager = SurvivalManager(self.keyboard, self.gui.log)
+
+        # Configuração do Inventário
+        self.inventory_checker = InventoryChecker(
+            open_anchor_path="assets/mochila_aberta_ancora.png", 
+            empty_slot_path="assets/slot_vazio_mochila.png"
+        )
+
+        # Esvaziamento da mochila (shift-click) quando enche
+        self.dropper = InventoryDropper(
+            inventory_checker=self.inventory_checker,
+            mouse=self.mouse,
+            keyboard=self.keyboard,
+            screencap=self.capture,
+            logger_func=self.gui.log,
+            focus_callback=self._ensure_game_focus,
+        )
+
+        # Máquina de Estados (FSM)
+        self.fsm = TargetSeekerFSM(
+            inventory_checker=self.inventory_checker,
+            detector=self.detector,
+            mouse=self.mouse,
+            keyboard=self.keyboard,
+            screencap=self.capture,
+            logger_func=self.gui.log,
+            dropper=self.dropper,
+            stamina_reader=StaminaBarReader()
+        )
+
+    def _ensure_game_focus(self) -> bool:
+        """Traz o RuneScape para o primeiro plano; loga só quando precisou agir."""
+        if self.capture.is_focused():
+            return True
+        if self.capture.focus():
+            self.gui.log("[FOCO] Janela do jogo trazida para o primeiro plano.")
+            return True
+        self.gui.log("[FOCO] Não foi possível focar a janela do jogo!")
+        return False
+
+    def _configure_session(self):
+        """Lê os dados da GUI e configura os serviços para o 'Play'."""
+        # 1. Captura estados da GUI (Desacoplados)
+        use_pot = self.gui.use_potion_var.get()
+        use_pray = self.gui.use_prayer_var.get()
+        use_mask = self.gui.use_mask_var.get()
+        use_ia = self.gui.use_yolo_var.get()
+        
+        # 2. Captura chaves e caminhos
+        pot_key = self.gui.potion_key_var.get().strip()
+        pray_key = self.gui.prayer_key_var.get().strip()
+        mask_key = self.gui.mask_key_var.get().strip()
+
+        skill = self.gui.skill_var.get()
+        target = self.gui.target_var.get()
+        model_path = self.gui.model_path_var.get()
+
+        # Passamos cada estado individualmente para o manager
+        self.survival_manager.configure_all(
+            pot_enabled=use_pot,
+            pot_key=pot_key,
+            pray_enabled=use_pray,
+            pray_key=pray_key,
+            mask_enabled=use_mask,
+            mask_key=mask_key
+        )
+        # Configura IA (YOLO)
+        has_ia_active = use_ia and all([model_path, target, skill])
+        self.dropper.configure(
+            enabled=has_ia_active and self.gui.use_drop_var.get(),
+            item_image=self.gui.drop_item_var.get().strip(),
+            hotkey=self.gui.drop_key_var.get().strip(),
+        )
+        if has_ia_active:
+            if not os.path.exists(model_path):
+                raise RuntimeError(
+                    f"Modelo não encontrado: {model_path}. Treine/adicione o .pt para este alvo "
+                    "ou desmarque a IA."
+                )
+            if not self.detector.update_model(model_path):
+                raise RuntimeError("Erro ao carregar modelo .pt")
+            self.fsm.setup_session(target_class=target, validator_name=self.gui.xp_anchor_var.get())
+        else:
+            self.fsm.target_class = None
+            if not use_ia:
+                self.gui.log("[MODO] IA Desativada pelo usuário.")
+            self.gui.log("[MODO] Serviços de suporte ativos conforme seleção.")
+
+        # Reclique na rocha conforme a barra de stamina da mineração
+        try:
+            pct = min(max(int(self.gui.reclick_pct_var.get().strip().rstrip("%")), 30), 100)
+        except ValueError:
+            pct = 85
+        self.fsm.reclick_enabled = bool(has_ia_active and self.gui.use_reclick_var.get())
+        self.fsm.reclick_threshold = pct / 100
+        if self.fsm.reclick_enabled:
+            self.gui.log(f"[STAMINA] Reclique ativo: reclica na rocha quando a barra passar de {pct}%.")
+
+        return has_ia_active
+
+    def start(self):
+        """Valida e inicia a thread do motor."""
+        if self.is_running: return
+
+        try:
+            has_ia = self._configure_session()
+
+            if not self._ensure_game_focus():
+                raise RuntimeError("Janela do RuneScape não encontrada ou não pôde ser focada.")
+
+            self.is_running = True
+            self.bot_thread = threading.Thread(target=self._bot_loop, daemon=True)
+            self.bot_thread.start()
             
-            if frame is not None:
-                # 3. Update Finite State Machine with real world data
-                fsm.update(frame)
-            else:
-                # Window not found, wait and retry
-                print(f"[{time.strftime('%X')}] [Erro] Não foi possível capturar a janela 'RuneScape'.")
+            self.gui.log(f"[MOTOR] Executando! (IA: {'Ligada' if has_ia else 'Desligada'})")
+        except Exception as e:
+            self.gui.log(f"[ERRO] Falha ao iniciar: {e}")
+
+    def stop(self):
+        self.is_running = False
+        self.gui.log("\n[ORQUESTRADOR] Parada solicitada.")
+
+    def _bot_loop(self):
+        """Loop principal de processamento."""
+        while self.is_running:
+            frame = self.capture.get_frame()
+            if frame is None: 
+                self.gui.log("[ERRO VISÃO] Janela do jogo não detectada!")
                 time.sleep(2)
-            
-            # 4. Tick Rate control
-            time.sleep(0.1)
-            
-    except KeyboardInterrupt:
-        print(f"\n[{time.strftime('%X')}] [Encerrado] Bot interrompido pelo usuário.")
-    except Exception as e:
-        print(f"\n[{time.strftime('%X')}] [Erro Fatal] Ocorreu uma exceção: {e}")
-    finally:
-        cv2.destroyAllWindows()
+                continue
+
+            # 1. Prioridade: Sobrevivência (Sempre roda se configurado)
+            self.survival_manager.update_all(frame)
+
+            # 2. Lógica de Atividade (FSM) - Só roda se houver alvo
+            if self.fsm.target_class:
+                self.fsm.update(frame)
+                self._update_state_log()
+
+            # Durante o drop o ciclo é mais curto para os toques saírem no ritmo configurado
+            time.sleep(0.03 if self.fsm.state == "DROPANDO" else 0.1)
+
+    def _update_state_log(self):
+        """Monitora e loga mudanças de estado da FSM."""
+        current_state = self.fsm.state
+        if current_state != self.last_state:
+            self.gui.log(f"-> Estado: {current_state}")
+            self.last_state = current_state
+
+   
+
+    def run(self):
+        self.root.mainloop()
 
 if __name__ == "__main__":
-    run_bot()
+    try:
+        controller = BotController()
+        controller.run()
+    except Exception as e:
+        print(f"\n[Erro Fatal] {e}")

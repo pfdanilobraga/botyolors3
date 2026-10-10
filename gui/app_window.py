@@ -1,0 +1,257 @@
+import customtkinter as ctk
+import datetime
+import os
+import subprocess
+import sys
+from config.activities import ACTIVITIES
+
+# Configuração global do tema
+ctk.set_appearance_mode("Dark")
+ctk.set_default_color_theme("blue")
+
+class BotInterface:
+    def __init__(self, root, start_callback, stop_callback):
+        self.root = root
+        self.root.title("RS3 VisionBot Engine v2.0")
+        self.root.geometry("550x910")
+        self.root.resizable(False, False)
+        
+        # --- Variáveis de Controle ---
+        self.use_yolo_var = ctk.BooleanVar(value=True) # Controla se a IA está ativa
+        self.skill_var = ctk.StringVar()
+        self.target_var = ctk.StringVar()
+        self.model_path_var = ctk.StringVar()
+        self.xp_anchor_var = ctk.StringVar()
+        self.drop_item_var = ctk.StringVar()
+        self.use_drop_var = ctk.BooleanVar(value=True)  # Dropa o item quando a mochila enche
+        self.use_reclick_var = ctk.BooleanVar(value=True)   # Reclica na rocha pela barra de stamina
+        self.reclick_pct_var = ctk.StringVar(value="85")
+        self.drop_key_var = ctk.StringVar(value="-")    # Tecla do slot da barra de ações que dropa o item
+        
+        # Variáveis de Sobrevivência
+        self.use_potion_var = ctk.BooleanVar(value=False)
+        self.potion_key_var = ctk.StringVar(value="2")
+        #variaveis de prayer
+        self.use_prayer_var = ctk.BooleanVar(value=False)
+        self.prayer_key_var = ctk.StringVar(value="3")
+         # Variáveis de Máscara
+        self.use_mask_var = ctk.BooleanVar(value=False)
+        self.mask_key_var = ctk.StringVar(value="1")
+
+        self._setup_widgets(start_callback, stop_callback)
+        self._set_default_values()
+
+    def _setup_widgets(self, start_cmd, stop_cmd):
+        main_frame = ctk.CTkFrame(self.root)
+        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
+
+        title_label = ctk.CTkLabel(main_frame, text="Configurações do Bot", font=ctk.CTkFont(size=20, weight="bold"))
+        title_label.pack(pady=(10, 10))
+
+        # ==========================================
+        # SEÇÃO: CONTROLE DE IA (YOLO)
+        # ==========================================
+        yolo_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        yolo_frame.pack(fill="x", padx=10, pady=5)
+
+        self.yolo_checkbox = ctk.CTkCheckBox(
+            yolo_frame, 
+            text="Ativar Inteligência Artificial (Modelos YOLO)", 
+            variable=self.use_yolo_var,
+            command=self._toggle_yolo_fields,
+            font=ctk.CTkFont(weight="bold"),
+            fg_color="#3498db"
+        )
+        self.yolo_checkbox.pack(side="left", pady=5)
+
+        # --- Container dos Campos de IA ---
+        self.ia_config_frame = ctk.CTkFrame(main_frame)
+        self.ia_config_frame.pack(fill="x", padx=10, pady=5)
+        self.ia_config_frame.columnconfigure(1, weight=1)
+
+        # Habilidade
+        ctk.CTkLabel(self.ia_config_frame, text="Habilidade:").grid(row=0, column=0, sticky="w", pady=5, padx=10)
+        self.skill_combo = ctk.CTkOptionMenu(self.ia_config_frame, variable=self.skill_var, values=list(ACTIVITIES.keys()), command=self._on_skill_change)
+        self.skill_combo.grid(row=0, column=1, sticky="ew", pady=5, padx=10)
+
+        # Alvo
+        ctk.CTkLabel(self.ia_config_frame, text="Alvo:").grid(row=1, column=0, sticky="w", pady=5, padx=10)
+        self.target_combo = ctk.CTkOptionMenu(self.ia_config_frame, variable=self.target_var, command=self._on_target_change)
+        self.target_combo.grid(row=1, column=1, sticky="ew", pady=5, padx=10)
+
+        # Modelo
+        ctk.CTkLabel(self.ia_config_frame, text="Modelo (.pt):", text_color="gray").grid(row=2, column=0, sticky="w", pady=5, padx=10)
+        self.model_entry = ctk.CTkEntry(self.ia_config_frame, textvariable=self.model_path_var, state="disabled")
+        self.model_entry.grid(row=2, column=1, sticky="ew", pady=5, padx=10)
+
+       # ==========================================
+        # SEÇÃO: SOBREVIVÊNCIA (POTION)
+        # ==========================================
+        potion_group = ctk.CTkFrame(main_frame)
+        potion_group.pack(fill="x", padx=10, pady=5)
+        potion_group.columnconfigure(1, weight=1)
+
+        self.potion_checkbox = ctk.CTkCheckBox(
+            potion_group, text="Auto-Potion (Restaurar Recurso)", 
+            variable=self.use_potion_var, 
+            command=self._toggle_potion_entry, # Novo método de toggle
+            font=ctk.CTkFont(weight="bold"),
+            fg_color="#e67e22" # Cor laranja para destacar poções
+        )
+        self.potion_checkbox.grid(row=0, column=0, columnspan=2, padx=10, pady=(10, 5), sticky="w")
+
+        ctk.CTkLabel(potion_group, text="Hotkey Potion:", text_color="gray").grid(row=1, column=0, padx=(20, 5), pady=(0, 10), sticky="w")
+        self.potion_entry = ctk.CTkEntry(potion_group, textvariable=self.potion_key_var, width=60, state="disabled")
+        self.potion_entry.grid(row=1, column=1, padx=10, pady=(0, 10), sticky="w")
+
+        # ==========================================
+        # SEÇÃO: SOBREVIVÊNCIA (PRAYER/CURSE)
+        # ==========================================
+        prayer_group = ctk.CTkFrame(main_frame)
+        prayer_group.pack(fill="x", padx=10, pady=5)
+        prayer_group.columnconfigure(1, weight=1)
+
+        self.prayer_checkbox = ctk.CTkCheckBox(
+            prayer_group, text="Auto-Prayer (Reativar Orações)", 
+            variable=self.use_prayer_var, 
+            command=self._toggle_prayer_entry,
+            font=ctk.CTkFont(weight="bold"),
+            fg_color="#f1c40f" # Cor amarela para destacar prayer
+        )
+        self.prayer_checkbox.grid(row=0, column=0, columnspan=2, padx=10, pady=(10, 5), sticky="w")
+
+        ctk.CTkLabel(prayer_group, text="Hotkey Prayer:", text_color="gray").grid(row=1, column=0, padx=(20, 5), pady=(0, 10), sticky="w")
+        self.prayer_entry = ctk.CTkEntry(prayer_group, textvariable=self.prayer_key_var, width=60, state="disabled")
+        self.prayer_entry.grid(row=1, column=1, padx=10, pady=(0, 10), sticky="w")
+        # ==========================================
+        # SEÇÃO: CRYSTAL MASK (Timer Service)
+        # ==========================================
+        mask_group = ctk.CTkFrame(main_frame)
+        mask_group.pack(fill="x", padx=10, pady=10)
+        
+        mask_group.columnconfigure(1, weight=1)
+
+        # 1. Checkbox para Ativar/Desativar
+        self.mask_checkbox = ctk.CTkCheckBox(
+            mask_group, text="Auto Crystal Mask (4:50 min)", 
+            variable=self.use_mask_var,
+            font=ctk.CTkFont(weight="bold")
+        )
+        self.mask_checkbox.grid(row=0, column=0, columnspan=2, padx=10, pady=(10, 5), sticky="w")
+
+        # 2. Linha da Hotkey Mask
+        ctk.CTkLabel(mask_group, text="Hotkey Mask:", text_color="gray").grid(row=1, column=0, padx=(20, 5), pady=5, sticky="w")
+        self.mask_entry = ctk.CTkEntry(mask_group, textvariable=self.mask_key_var, width=60, state="disabled")
+        self.mask_entry.grid(row=1, column=1, padx=10, pady=5, sticky="w")
+
+        # ==========================================
+        # SEÇÃO: AUTO-DROP (mochila cheia)
+        # ==========================================
+        drop_group = ctk.CTkFrame(main_frame)
+        drop_group.pack(fill="x", padx=10, pady=5)
+
+        drop_group.columnconfigure(1, weight=1)
+
+        self.drop_checkbox = ctk.CTkCheckBox(
+            drop_group, text="Auto-Drop (esvaziar a mochila ao encher)",
+            variable=self.use_drop_var,
+            font=ctk.CTkFont(weight="bold"),
+            fg_color="#9b59b6"
+        )
+        self.drop_checkbox.grid(row=0, column=0, columnspan=2, padx=10, pady=(10, 5), sticky="w")
+
+        ctk.CTkLabel(drop_group, text="Hotkey Drop (barra de ações):", text_color="gray").grid(row=1, column=0, padx=(20, 5), pady=(0, 10), sticky="w")
+        self.drop_entry = ctk.CTkEntry(drop_group, textvariable=self.drop_key_var, width=60)
+        self.drop_entry.grid(row=1, column=1, padx=10, pady=(0, 10), sticky="w")
+
+        # ==========================================
+        # SEÇÃO: RECLIQUE (barra de stamina da mineração)
+        # ==========================================
+        reclick_group = ctk.CTkFrame(main_frame)
+        reclick_group.pack(fill="x", padx=10, pady=5)
+
+        self.reclick_checkbox = ctk.CTkCheckBox(
+            reclick_group, text="Reclicar na rocha quando a barra passar de",
+            variable=self.use_reclick_var,
+            font=ctk.CTkFont(weight="bold"),
+            fg_color="#1abc9c"
+        )
+        self.reclick_checkbox.pack(side="left", padx=(10, 6), pady=10)
+        self.reclick_entry = ctk.CTkEntry(reclick_group, textvariable=self.reclick_pct_var, width=50)
+        self.reclick_entry.pack(side="left")
+        ctk.CTkLabel(reclick_group, text="%", text_color="gray").pack(side="left", padx=(4, 0))
+
+        # --- Botões ---
+        button_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        button_frame.pack(pady=10)
+
+        self.btn_start = ctk.CTkButton(button_frame, text="START BOT", fg_color="#2ecc71", command=start_cmd, font=ctk.CTkFont(weight="bold"))
+        self.btn_start.pack(side="left", padx=10)
+
+        self.btn_stop = ctk.CTkButton(button_frame, text="STOP BOT", fg_color="#e74c3c", command=stop_cmd, font=ctk.CTkFont(weight="bold"))
+        self.btn_stop.pack(side="left", padx=10)
+
+        self.btn_trainer = ctk.CTkButton(button_frame, text="TREINADOR", fg_color="#3498db", command=self._open_trainer, font=ctk.CTkFont(weight="bold"))
+        self.btn_trainer.pack(side="left", padx=10)
+
+        # --- Logs ---
+        self.log_area = ctk.CTkTextbox(main_frame, state='disabled', height=150)
+        self.log_area.pack(fill="both", expand=True, padx=10, pady=10)
+
+    # --- Lógica de Interface ---
+
+    def _open_trainer(self):
+        """Abre o Treinador (coletar, anotar, treinar e registrar alvos) em outra janela/processo."""
+        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        try:
+            subprocess.Popen([sys.executable, os.path.join(root_dir, "trainer_main.py")], cwd=root_dir)
+            self.log("[TREINADOR] Abrindo... (depois de treinar um novo alvo, reinicie o bot para vê-lo na lista)")
+        except Exception as e:
+            self.log(f"[ERRO] Não foi possível abrir o Treinador: {e}")
+
+    def _toggle_yolo_fields(self):
+        """Habilita ou desabilita os seletores de IA."""
+        state = "normal" if self.use_yolo_var.get() else "disabled"
+        self.skill_combo.configure(state=state)
+        self.target_combo.configure(state=state)
+        self.ia_config_frame.configure(fg_color="transparent" if state == "normal" else "#2b2b2b")
+
+    def _toggle_potion_entry(self):
+        state = "normal" if self.use_potion_var.get() else "disabled"
+        self.potion_entry.configure(state=state)
+
+    def _toggle_prayer_entry(self):
+        state = "normal" if self.use_prayer_var.get() else "disabled"
+        self.prayer_entry.configure(state=state)
+
+    def _on_skill_change(self, value=None):
+        skill = self.skill_var.get()
+        if skill in ACTIVITIES:
+            targets = list(ACTIVITIES[skill].keys())
+            self.target_combo.configure(values=targets)
+            self.target_var.set(targets[0])
+            self._on_target_change()
+
+    def _on_target_change(self, value=None):
+        skill = self.skill_var.get()
+        target = self.target_var.get()
+        if skill in ACTIVITIES and target in ACTIVITIES[skill]:
+            config = ACTIVITIES[skill][target]
+            self.model_path_var.set(config["model"])
+            self.xp_anchor_var.set(config["xp_validator"])
+            self.drop_item_var.set(config.get("drop_item", ""))
+
+    def _set_default_values(self):
+        if ACTIVITIES:
+            first_skill = list(ACTIVITIES.keys())[0]
+            self.skill_var.set(first_skill)
+            self._on_skill_change()
+
+    def log(self, message):
+        self.log_area.configure(state='normal')
+        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+        self.log_area.insert("end", f"[{timestamp}] {message}\n")
+        self.log_area.see("end")
+        self.log_area.configure(state='disabled')
+
+  

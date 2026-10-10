@@ -3,14 +3,16 @@ import random
 import numpy as np
 import pydirectinput
 import pyautogui
-from typing import Tuple
+from typing import Callable, Optional, Tuple
 
 class MouseActuator:
     """
     Simulates human-like mouse movements using Bézier curves and parametric noise.
     """
     
-    def __init__(self):
+    def __init__(self, focus_callback: Optional[Callable[[], bool]] = None):
+        # Chamado antes de cada clique: garante o foco na janela do jogo (retorna True/False)
+        self.focus_callback = focus_callback
         # Disable pyautogui's fail-safe for more control, but keep it in mind
         pyautogui.FAILSAFE = True
         # Set pause between actions to 0 to manage it manually
@@ -79,9 +81,18 @@ class MouseActuator:
 
     def human_click_at(self, x: int, y: int, button: str = 'left'):
         """
-        Moves to a target and clicks.
+        Adiciona ruído no alvo final, move de forma orgânica e clica.
         """
-        self.move_to(x, y)
+        if self.focus_callback and not self.focus_callback():
+            print(f"[{time.strftime('%X')}] Mouse: janela do jogo sem foco, clique em ({x}, {y}) ignorado")
+            return
+
+        # Desvia o alvo final em até 4 pixels para qualquer direção.
+        # Assim, o clique nunca ocorre no exato centro detectado pelo YOLO.
+        target_x = x + random.randint(-4, 4)
+        target_y = y + random.randint(-4, 4)
+        
+        self.move_to(target_x, target_y)
         time.sleep(random.uniform(0.05, 0.2))
         self.click(button)
 
