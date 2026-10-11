@@ -1,23 +1,17 @@
 """
 Tabela de XP do RuneScape 3, meta de nível por habilidade e persistência do progresso entre sessões.
 
-Nada aqui lê o jogo: o XP é uma ESTIMATIVA (itens obtidos x XP por item) que o usuário pode corrigir
-a qualquer momento informando o nível/XP reais.
+Nada aqui lê o jogo: o XP chega por leituras (o tooltip da aba Skills) ou digitado pelo usuário, e este módulo
+só calcula nível, ritmo e distância até a meta a partir delas.
 """
 import json
 import math
 import os
-from typing import Dict, Optional
+from typing import Optional, Tuple
 
 MAX_LEVEL = 120
 
 PROGRESS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config", "progress.json")
-
-# XP base por item coletado, sem bônus de roupa/evento (o usuário edita o valor na tela)
-DEFAULT_XP_PER_ITEM: Dict[str, Dict[str, float]] = {
-    "Mineração": {"Copper": 17.5, "Iron": 35.0, "Mithril": 80.0},
-}
-
 
 def xp_for_level(level: int) -> int:
     """XP total necessário para ALCANÇAR `level` (nível 1 = 0 XP; nível 99 = 13.034.431)."""
@@ -34,38 +28,53 @@ def level_for_xp(xp: float) -> int:
     return level
 
 
-def default_xp_per_item(skill: str, target: str) -> float:
-    return DEFAULT_XP_PER_ITEM.get(skill, {}).get(target, 0.0)
-
-
 class SkillGoal:
     """
-    Acompanha o XP estimado de UMA habilidade durante a sessão e a distância até o nível-meta.
-    O XP ganho é `itens x xp_per_item`; `sync()` corrige o total quando o usuário informa o valor real.
+    Acompanha o XP de UMA habilidade a partir de leituras (xp, instante) e a distância até o nível-meta.
+    O ritmo (XP/hora) vem da primeira à última leitura; entre leituras o XP é só extrapolado (estimated_xp).
     """
 
-    def __init__(self, skill: str, start_xp: float, xp_per_item: float = 0.0, target_level: Optional[int] = None):
+    MIN_SPAN_S = 60.0  # intervalo mínimo entre a primeira e a última leitura para falar em XP/hora
+
+    def __init__(self, skill: str, target_level: Optional[int] = None):
         self.skill = skill
-        self.start_xp = max(float(start_xp), 0.0)
-        self.xp_per_item = max(float(xp_per_item), 0.0)
         self.target_level = target_level
-        self.items = 0
+        self.first: Optional[Tuple[float, float]] = None  # (xp, instante) da leitura-base
+        self.last: Optional[Tuple[float, float]] = None   # (xp, instante) da leitura mais recente
+        self.readings = 0
+        self.manual_seed = False  # a base foi digitada: a primeira leitura do jogo a substitui
+
+    def observe(self, xp: float, now: float, manual: bool = False) -> None:
+        """
+        Registra o XP total (lido do jogo, ou digitado se manual=True). Uma leitura manual, ou a primeira
+        leitura do jogo depois de uma manual, recomeça a medição do ritmo a partir dela.
+        """
+        xp = max(float(xp), 0.0)
+        if self.last is None or manual or self.manual_seed:
+            self.first = (xp, now)
+        self.last = (xp, now)
+        self.manual_seed = manual
+        self.readings += 1
+
+    @property
+    def has_reading(self) -> bool:
+        return self.last is not None
+
+    @property
+    def xp(self) -> Optional[float]:
+        return self.last[0] if self.last else None
+
+    @property
+    def level(self) -> Optional[int]:
+        return level_for_xp(self.last[0]) if self.last else None
+
+    @property
+    def start_level(self) -> Optional[int]:
+        return level_for_xp(self.first[0]) if self.first else None
 
     @property
     def gained(self) -> float:
-        return self.items * self.xp_per_item
-
-    @property
-    def xp(self) -> float:
-        return self.start_xp + self.gained
-
-    @property
-    def level(self) -> int:
-        return level_for_xp(self.xp)
-
-    @property
-    def start_level(self) -> int:
-        return level_for_xp(self.start_xp)
+        return self.last[0] - self.first[0] if self.last and self.first else 0.0
 
     @property
     def target_xp(self) -> Optional[float]:
@@ -74,40 +83,45 @@ class SkillGoal:
     @property
     def xp_to_goal(self) -> Optional[float]:
         target = self.target_xp
-        return None if target is None else max(target - self.xp, 0.0)
+        return None if target is None or self.last is None else max(target - self.last[0], 0.0)
 
     @property
     def reached(self) -> bool:
         target = self.target_xp
-        return target is not None and self.xp >= target
+        return target is not None and self.last is not None and self.last[0] >= target
 
     @property
     def progress(self) -> Optional[float]:
-        """Fração (0-1) do caminho entre o XP do início (ou da última correção) e a meta."""
+        """Fração (0-1) do caminho entre a leitura-base e a meta."""
         target = self.target_xp
-        if target is None:
+        if target is None or self.first is None or self.last is None:
             return None
-        if target <= self.start_xp:
+        if target <= self.first[0]:
             return 1.0
-        return min(max((self.xp - self.start_xp) / (target - self.start_xp), 0.0), 1.0)
+        return min(max((self.last[0] - self.first[0]) / (target - self.first[0]), 0.0), 1.0)
 
-    def add_items(self, count: int) -> None:
-        self.items += max(int(count), 0)
-
-    def sync(self, xp: float) -> None:
-        """Corrige o XP total para `xp` (valor real). O ponto de partida passa a ser o valor corrigido
-        (menos o já ganho), então a correção não é contada como XP ganho."""
-        self.start_xp = max(float(xp) - self.gained, 0.0)
-
-    def xp_per_hour(self, elapsed_s: float) -> float:
-        return self.gained / (elapsed_s / 3600) if elapsed_s >= 1 else 0.0
-
-    def eta_seconds(self, elapsed_s: float) -> Optional[float]:
-        """Tempo estimado até a meta no ritmo atual; None sem meta ou sem ritmo medido."""
-        to_go, rate = self.xp_to_goal, self.xp_per_hour(elapsed_s)
-        if to_go is None or rate <= 0:
+    def xp_per_hour(self) -> Optional[float]:
+        """Ritmo da primeira à última leitura; None enquanto não há duas leituras separadas o bastante."""
+        if not self.first or not self.last:
             return None
-        return to_go / rate * 3600
+        span = self.last[1] - self.first[1]
+        if span < self.MIN_SPAN_S or self.last[0] <= self.first[0]:
+            return None
+        return (self.last[0] - self.first[0]) / span * 3600
+
+    def estimated_xp(self, now: float) -> Optional[float]:
+        """XP agora: a última leitura mais o ritmo desde então (só uma estimativa para decidir quando reler)."""
+        if not self.last:
+            return None
+        rate = self.xp_per_hour()
+        return self.last[0] + (rate * (now - self.last[1]) / 3600 if rate else 0.0)
+
+    def eta_seconds(self, now: float) -> Optional[float]:
+        """Tempo estimado até a meta no ritmo atual; None sem meta ou sem ritmo medido."""
+        rate, target = self.xp_per_hour(), self.target_xp
+        if rate is None or target is None:
+            return None
+        return max(target - self.estimated_xp(now), 0.0) / rate * 3600
 
 
 def _parse_number(text: str, label: str, decimal: bool = False) -> Optional[float]:
@@ -136,8 +150,8 @@ def parse_decimal(text: str, label: str) -> Optional[float]:
 
 class ProgressStore:
     """
-    Guarda em config/progress.json o XP estimado de cada habilidade (para a próxima sessão continuar de
-    onde esta parou), a meta escolhida e o XP por item de cada alvo. Lê o arquivo a cada chamada.
+    Guarda em config/progress.json o último XP lido de cada habilidade e a meta escolhida (para preencher a
+    tela na próxima sessão). Lê o arquivo a cada chamada.
     """
 
     def __init__(self, path: str = PROGRESS_PATH):
@@ -163,18 +177,11 @@ class ProgressStore:
         entry = self._load().get("skills", {}).get(skill)
         return entry if isinstance(entry, dict) else {}
 
-    def save_skill(self, skill: str, xp: float, target_level: Optional[int]) -> None:
+    def save_skill(self, skill: str, xp: Optional[float], target_level: Optional[int]) -> None:
+        """Grava o último XP lido e a meta. xp None mantém o XP já salvo (sessão sem nenhuma leitura)."""
         data = self._load()
-        data.setdefault("skills", {})[skill] = {"xp": round(float(xp), 1), "target_level": target_level}
-        self._save(data)
-
-    def xp_per_item(self, skill: str, target: str) -> float:
-        stored = self._load().get("xp_per_item", {}).get(f"{skill}/{target}")
-        if isinstance(stored, (int, float)) and stored > 0:
-            return float(stored)
-        return default_xp_per_item(skill, target)
-
-    def save_xp_per_item(self, skill: str, target: str, value: float) -> None:
-        data = self._load()
-        data.setdefault("xp_per_item", {})[f"{skill}/{target}"] = float(value)
+        skills = data.setdefault("skills", {})
+        if xp is None:
+            xp = skills.get(skill, {}).get("xp")
+        skills[skill] = {"xp": None if xp is None else round(float(xp), 1), "target_level": target_level}
         self._save(data)

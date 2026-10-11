@@ -12,17 +12,27 @@ from actuators.keyboard import KeyboardActuator
 from engine.state_seeker import TargetSeekerFSM
 from engine.survival_manager import SurvivalManager
 from engine.drop_module import InventoryDropper
-from engine.session import ItemGainTracker, SessionMonitor, format_duration, format_number
+from antiban import humanize
+from engine.logout import LogoutAction
+from engine.safety import SafetyGuard
+from engine.session import FROZEN, LEVEL_UP, SessionEvent, SessionMonitor, format_duration, format_number
 from engine.skill_goals import ProgressStore, SkillGoal, xp_for_level
+from engine.xp_checker import XpChecker
+from vision.chat_levelup import ChatLevelUpWatcher
+from vision.skills_panel import skill_cell
 from vision.stamina import StaminaBarReader
 
 class BotController:
+    LEVEL_TRIGGER_COOLDOWN = 30.0   # s mínimos entre duas leituras pedidas pela mensagem de nível no chat
+
     def __init__(self):
         # 1. Configurações de Estado
         self.is_running = False
         self.last_state = "IDLE"
         self._goal_skill = ""
-        self._goal_target = ""
+        self._xp_hotkey = "h"
+        self._last_level_trigger = 0.0    # instante do último gatilho de leitura por mensagem de nível no chat
+        self._xp_lock = threading.Lock()  # uma leitura de XP por vez (laço do bot x botão "Ler XP agora")
 
         # 2. Inicialização da GUI
         self.root = tk.Tk()
@@ -32,11 +42,18 @@ class BotController:
         # 3. Instanciação dos Módulos (Core)
         self._initialize_core_modules()
 
-        # 4. Sessão: tempo limite, XP/nível estimados e meta
+        # 4. Sessão: tempo limite, XP/nível lidos da aba Skills e meta
         self.session = SessionMonitor()
         self.progress = ProgressStore()
-        self.gain_tracker = ItemGainTracker(self.inventory_checker)
-        self.gui.bind_session(self.session.snapshot, self.sync_progress)
+        self.xp_checker = XpChecker(self.capture, self.mouse, self.keyboard, self.gui.log,
+                                    focus_callback=self._ensure_game_focus)
+        self.chat_watcher = ChatLevelUpWatcher()  # mensagem de subida de nível no chat = hora de ler o XP
+        # Segurança: perdido (muito tempo sem rochas) -> parar, avisar e deslogar
+        self.safety = SafetyGuard(self.fsm)
+        self.logout = LogoutAction(self.capture, self.mouse, self.keyboard, self.gui.log,
+                                   is_ingame=self.inventory_checker.is_open, focus_callback=self._ensure_game_focus)
+        self._pending_logout = False
+        self.gui.bind_session(self.session.snapshot, self.sync_progress, self.read_xp_now)
         
         self.gui.log("[SYSTEM] Bot pronto para configuração.")
 
@@ -150,41 +167,60 @@ class BotController:
         if self.fsm.reclick_enabled:
             self.gui.log(f"[STAMINA] Reclique ativo: reclica na rocha quando a barra passar de {pct}%.")
 
+        # Câmera: gira com as setas se ficar um tempo sem ver rochas
+        try:
+            camera_after = max(float(self.gui.camera_after_var.get().strip().replace(",", ".")), 3.0)
+        except ValueError:
+            camera_after = 10.0
+        self.fsm.camera_search_enabled = bool(has_ia_active and self.gui.use_camera_var.get())
+        self.fsm.camera_search_after = camera_after
+        if self.fsm.camera_search_enabled:
+            self.gui.log(f"[CÂMERA] Busca ativa: gira a câmera (setas) se ficar {camera_after:g}s sem ver rochas.")
+
         self._configure_goals(has_ia_active)
+        self._configure_safety(has_ia_active)
         return has_ia_active
 
-    def _configure_goals(self, has_ia_active: bool):
-        """Tempo limite + acompanhamento de nível/meta, a partir do painel Sessão & Metas."""
+    def _configure_safety(self, has_ia_active: bool):
+        """Liga a rede de segurança (bot perdido) conforme o painel Sessão & Metas."""
         settings = self.gui.session_panel.read()
-        skill, target = self.gui.skill_var.get(), self.gui.target_var.get()
-        self._goal_skill, self._goal_target = skill, target
+        self._pending_logout = False
+        enabled = bool(settings.safety)   # "perdido" só dispara com a IA procurando rochas; a tela congelada vale sempre
+        self.safety.configure(enabled, settings.lost_after_s, settings.logout)
+        if enabled:
+            logout = "Deslogará em seguida." if settings.logout and self.logout.ready else (
+                "Sem assets/logout_botao.png: só vai parar e avisar, sem deslogar." if settings.logout else "")
+            self.gui.log(f"[SEGURANÇA] Ativa: para se ficar {settings.lost_after_s / 60:g} min sem ver rochas ou se a tela do jogo ficar parada por {self.safety.FROZEN_AFTER_S:g}s (jogo travado). {logout}".rstrip())
+
+    def _configure_goals(self, has_ia_active: bool):
+        """Tempo limite + leitura do XP/meta de nível, a partir do painel Sessão & Metas."""
+        settings = self.gui.session_panel.read()
+        skill = self.gui.skill_var.get()
+        self._goal_skill, self._xp_hotkey = skill, settings.hotkey
+
+        auto = settings.auto_read
+        if auto and not self.xp_checker.ready:
+            self.gui.log("[SESSÃO] Faltam os modelos da aba Skills em assets/skills: leitura do XP desligada.")
+            auto = False
+        elif auto and skill_cell(skill) is None:
+            self.gui.log(f"[SESSÃO] '{skill}' ainda não está mapeada na aba Skills: leitura do XP desligada.")
+            auto = False
 
         goal = None
-        if settings.level is not None:
+        if auto or settings.level is not None:
+            goal = SkillGoal(skill, settings.target_level)
+        self.session.configure(settings.duration_s, goal, settings.stop_on_goal, settings.interval_s if auto else 0.0)
+        if goal and settings.level is not None:  # ponto de partida digitado; a 1ª leitura do jogo o substitui
             start_xp = settings.xp if settings.xp is not None else xp_for_level(settings.level)
-            goal = SkillGoal(skill, start_xp, settings.xp_per_item, settings.target_level)
-            if settings.xp_per_item > 0:
-                self.progress.save_xp_per_item(skill, target, settings.xp_per_item)
-
-        self.session.configure(settings.duration_s, goal, settings.stop_on_goal)
-
-        # Os itens são contados pelo ícone do minério (o mesmo do Auto-drop), mesmo com o drop desligado
-        counting = False
-        if goal and has_ia_active:
-            counting = self.gain_tracker.configure(self.gui.drop_item_var.get().strip())
-        else:
-            self.gain_tracker.configure(None)
+            self.session.observe(start_xp, manual=True)
 
         if settings.duration_s > 0:
             self.gui.log(f"[SESSÃO] Tempo de bot: {format_duration(settings.duration_s)}.")
         if goal:
-            meta = f", meta: nível {goal.target_level}" if goal.target_level else ""
-            self.gui.log(f"[SESSÃO] {skill}: nível {goal.level} ({goal.xp:,.0f} XP){meta}.".replace(",", "."))
-            if not counting:
-                self.gui.log("[SESSÃO] Sem ícone do item (ou IA desligada): o XP não será estimado sozinho. "
-                             "Use 'Corrigir nível/XP agora' para atualizar à mão.")
-            elif goal.xp_per_item <= 0:
-                self.gui.log("[SESSÃO] Informe o 'XP por item' para o bot estimar o XP ganho.")
+            meta = f"meta: nível {goal.target_level}" if goal.target_level else "sem meta"
+            how = (f"lendo o XP na aba Skills (tecla '{settings.hotkey}') a cada ~{settings.interval_s / 60:g} min (o intervalo varia)"
+                   if auto else "sem leitura automática do XP")
+            self.gui.log(f"[SESSÃO] {skill}: {meta}; {how}.")
 
     def start(self):
         """Valida e inicia a thread do motor."""
@@ -198,6 +234,9 @@ class BotController:
 
             self.is_running = True
             self.session.start()
+            humanize.new_session()   # o ritmo geral (rápido/lento) muda de uma sessão para outra
+            self.chat_watcher.reset()  # o que já está no chat ao iniciar não conta como subida de nível nova
+            self.safety.reset()
             self.bot_thread = threading.Thread(target=self._bot_loop, daemon=True)
             self.bot_thread.start()
             
@@ -218,30 +257,55 @@ class BotController:
                 if not self.is_running:
                     break
 
+                # Leitura do XP na aba Skills: só entre ações (nunca no meio de um clique ou de um drop)
+                if self.fsm.state not in ("DROPANDO", "MOVENDO_PARA_ALVO") and self.session.check_due():
+                    self._check_xp()
+
                 frame = self.capture.get_frame()
                 if frame is None: 
                     self.gui.log("[ERRO VISÃO] Janela do jogo não detectada!")
-                    time.sleep(2)
+                    time.sleep(humanize.uniform(1.4, 3.2))
                     continue
 
                 # 1. Prioridade: Sobrevivência (Sempre roda se configurado)
                 self.survival_manager.update_all(frame)
+
+                if self.chat_watcher.poll(frame):
+                    self._on_level_up_message()
+
+                danger = self.safety.check(frame)
+                if danger:
+                    self._pending_logout = danger.logout
+                    if danger.kind == FROZEN:
+                        self._save_frozen_frame(frame)
+                    self._handle_session_events([danger])
+                    break
 
                 # 2. Lógica de Atividade (FSM) - Só roda se houver alvo
                 if self.fsm.target_class:
                     self.fsm.update(frame)
                     self._update_state_log()
 
-                    gained = self.gain_tracker.update(frame, self.fsm.state)
-                    if gained:
-                        self.session.add_items(gained)
-
                 # Durante o drop o ciclo é mais curto para os toques saírem no ritmo configurado
-                time.sleep(0.03 if self.fsm.state == "DROPANDO" else 0.1)
+                time.sleep(humanize.uniform(0.02, 0.05) if self.fsm.state == "DROPANDO" else humanize.uniform(0.07, 0.16))
         finally:
             if threading.current_thread() is getattr(self, "bot_thread", None):
                 self.is_running = False  # laço terminou (parada, meta, tempo ou erro): libera o Start
             self._finish_session()
+            if self._pending_logout:   # emergência (perdido/morto): com o bot já parado, sai do jogo
+                self._pending_logout = False
+                self.logout.run()
+
+    def _save_frozen_frame(self, frame):
+        """Guarda em debug/ a imagem em que a tela estava congelada (prova do que o bot via)."""
+        try:
+            import cv2
+            os.makedirs("debug", exist_ok=True)
+            path = os.path.join("debug", f"jogo_travado_{time.strftime('%H%M%S')}.jpg")
+            cv2.imwrite(path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            self.gui.log(f"[SEGURANÇA] Imagem congelada salva em {path}")
+        except Exception:
+            pass
 
     def _handle_session_events(self, events):
         """Registra e avisa (som/popup) subidas de nível, meta atingida e fim do tempo; para o bot se pedido."""
@@ -251,8 +315,50 @@ class BotController:
             if event.stop:
                 self.is_running = False
 
+    def _on_level_up_message(self):
+        """Apareceu "You've just advanced a ... level!" no chat: confirma o nível/XP exato na aba Skills já."""
+        now = time.time()
+        if now - self._last_level_trigger < self.LEVEL_TRIGGER_COOLDOWN:
+            return
+        self._last_level_trigger = now
+        self.gui.log("[NÍVEL] Mensagem de subida de nível no chat.")
+        if self.session.goal is not None and self.session.auto_check:
+            # a leitura confirma o nível e avisa (som/meta) com o valor exato; começa alguns segundos depois da mensagem
+            self.session.request_check(delay=humanize.human_delay(3.5, 0.5, 0.4, 3.0))
+        else:
+            # sem leitura do XP não há o que confirmar: só avisa com o som de subida de nível
+            self.gui.post_event(SessionEvent(LEVEL_UP, "Subiu de nível", "Mensagem de subida de nível no chat."))
+
+    def _check_xp(self):
+        """Lê o XP real na aba Skills e entrega o resultado à sessão (que avisa nível/meta)."""
+        if not self._xp_lock.acquire(blocking=False):
+            return
+        try:
+            reading = self._safe_check(self._goal_skill, self._xp_hotkey)
+        finally:
+            self._xp_lock.release()
+        if reading:
+            self.session.observe(reading.xp)
+        else:
+            self.session.check_failed(self.xp_checker.last_failure or "leitura falhou",
+                                      numbers_only=self.xp_checker.last_failure_kind == "numbers")
+        self.fsm.last_xp_time = time.time()  # a leitura parou a FSM por alguns segundos: não é "XP parou"
+        # A aba Skills/o tooltip podem ter coberto a mensagem do chat durante a leitura: quando ela reaparecer não
+        # é uma mensagem nova (senão cada leitura dispararia a próxima)
+        self.chat_watcher.reset()
+
+    def _safe_check(self, skill: str, hotkey: str):
+        """A leitura é opcional: um erro inesperado nela não pode derrubar o bot (vira uma falha de leitura)."""
+        try:
+            return self.xp_checker.check(skill, hotkey)
+        except Exception as e:
+            self.xp_checker.last_failure = f"erro inesperado: {e}"
+            self.xp_checker.last_failure_kind = "ui"
+            self.gui.log(f"[XP] Leitura falhou: {self.xp_checker.last_failure}")
+            return None
+
     def _finish_session(self):
-        """Salva o nível/XP estimados (a próxima sessão continua daí) e registra o resumo."""
+        """Salva o último nível/XP lido (a tela já abre com ele na próxima sessão) e registra o resumo."""
         goal = self.session.goal
         if goal:
             try:
@@ -263,22 +369,44 @@ class BotController:
         if summary:
             self.gui.log(f"[SESSÃO] {summary}")
 
+    def read_xp_now(self):
+        """Botão 'Ler XP agora': com o bot rodando pede a leitura ao laço; parado, lê e mostra o resultado."""
+        if self.is_running:
+            if self.session.goal is None:
+                self.gui.log("[XP] Esta sessão não acompanha o XP: ligue 'Ler o XP real na aba Skills' e reinicie.")
+            else:
+                self.session.request_check()
+                self.gui.log("[XP] Leitura pedida: será feita entre as próximas ações do bot.")
+            return
+        skill, hotkey = self.gui.skill_var.get(), self.gui.session_panel.hotkey()
+        self.gui.log(f"[XP] Lendo o XP de {skill} na aba Skills (tecla '{hotkey}')...")
+        threading.Thread(target=self._read_xp_idle, args=(skill, hotkey), daemon=True).start()
+
+    def _read_xp_idle(self, skill: str, hotkey: str):
+        if not self._xp_lock.acquire(blocking=False):
+            return
+        try:
+            reading = self._safe_check(skill, hotkey)
+        finally:
+            self._xp_lock.release()
+        if reading:
+            self.gui.run_in_gui(lambda: self.gui.session_panel.show_manual_values(reading.level, reading.xp))
+
     def sync_progress(self):
-        """Botão 'Corrigir nível/XP agora': aplica o nível/XP digitados à sessão em andamento."""
+        """Botão 'Corrigir nível/XP à mão': aplica o nível/XP digitados à sessão em andamento."""
         try:
             settings = self.gui.session_panel.read()
         except ValueError as e:
             self.gui.log(f"[SESSÃO] {e}")
             return
-        goal = self.session.goal
         if settings.level is None:
             self.gui.log("[SESSÃO] Informe o nível (ou o XP) atual para corrigir.")
-        elif not (self.is_running and goal):
+        elif not (self.is_running and self.session.goal):
             self.gui.log("[SESSÃO] Sem sessão em andamento: o nível/XP digitados valem a partir do próximo Start.")
         else:
             xp = settings.xp if settings.xp is not None else xp_for_level(settings.level)
-            self.session.sync(xp)
-            self.gui.log(f"[SESSÃO] XP corrigido para {format_number(xp)} (nível {goal.level}).")
+            self.session.observe(xp, manual=True)
+            self.gui.log(f"[SESSÃO] XP corrigido à mão para {format_number(xp)} (nível {settings.level}).")
 
     def _update_state_log(self):
         """Monitora e loga mudanças de estado da FSM."""

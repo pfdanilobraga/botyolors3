@@ -1,12 +1,8 @@
-import glob
-import os
-
 import cv2
 import numpy as np
 import pytest
 
 from engine.drop_module import InventoryDropper
-from engine.session import ItemGainTracker
 from vision.inventory import InventoryChecker
 
 ANCHOR = "assets/mochila_aberta_ancora.png"
@@ -52,18 +48,3 @@ def test_dropper_find_slots_delegates_to_inventory(inventory):
     assert dropper.find_slots(synthetic_frame([(10, 40)])) is None      # sem template carregado
     dropper.template = cv2.imread(ORE)
     assert len(dropper.find_slots(synthetic_frame([(10, 40), (60, 40)]))) == 2
-
-
-MITHRIL_FRAMES = sorted(glob.glob("dataset/mithril/images/*.jpg"))
-
-
-@pytest.mark.skipif(len(MITHRIL_FRAMES) < 10, reason="capturas reais (dataset/) não estão nesta máquina")
-def test_real_mining_session_counts_each_new_ore(inventory):
-    """Nas capturas reais a mochila vai de 9 para 15 minérios: a sessão ganhou exatamente 6."""
-    tracker = ItemGainTracker(inventory)
-    assert tracker.configure("mithril_ore.png")
-    counts = [len(inventory.find_item_slots(cv2.imread(f), tracker.template, 0.85, 15) or []) for f in MITHRIL_FRAMES]
-    assert counts[0] == 9 and counts[-1] == 15
-
-    gained = sum(tracker.update(cv2.imread(f), "INTERAGINDO") for f in MITHRIL_FRAMES)
-    assert gained == counts[-1] - counts[0]

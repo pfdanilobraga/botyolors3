@@ -6,7 +6,7 @@ from ctypes import wintypes
 
 import customtkinter as ctk
 
-from engine.session import GOAL_REACHED, LEVEL_UP, TIME_UP
+from engine.session import FROZEN, GOAL_REACHED, LEVEL_UP, LOST, TIME_UP
 
 try:
     import winsound
@@ -18,6 +18,8 @@ _SOUNDS = {
     LEVEL_UP: [(880, 120), (1175, 180)],
     GOAL_REACHED: [(784, 160), (988, 160), (1175, 160), (1568, 400)] * 2,
     TIME_UP: [(988, 250), (784, 250), (659, 250), (523, 500)],
+    LOST: [(1000, 300), (700, 300)] * 4,                    # alarme: o bot está perdido
+    FROZEN: [(1400, 160), (700, 160)] * 6,                  # alarme rápido: a tela do jogo congelou
 }
 
 _FLASHW_ALL = 0x03

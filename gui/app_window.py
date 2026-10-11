@@ -7,6 +7,7 @@ import sys
 from config.activities import ACTIVITIES, custom_mtime, reload_activities
 from engine.skill_goals import ProgressStore
 from gui import alerts
+from gui.logfile import append_log
 from gui.session_panel import SessionPanel
 
 # Configuração global do tema
@@ -22,8 +23,10 @@ class BotInterface:
 
         # Sessão & Metas: o motor (outra thread) manda avisos por esta fila e a tela os consome em _poll
         self._events = queue.Queue()
+        self._calls = queue.Queue()
         self._snapshot_provider = None
         self._on_sync = None
+        self._on_read_now = None
         self._was_running = False
 
         # --- Variáveis de Controle ---
@@ -37,6 +40,8 @@ class BotInterface:
         self.use_drop_var = ctk.BooleanVar(value=True)  # Dropa o item quando a mochila enche
         self.use_reclick_var = ctk.BooleanVar(value=True)   # Reclica na rocha pela barra de stamina
         self.reclick_pct_var = ctk.StringVar(value="85")
+        self.use_camera_var = ctk.BooleanVar(value=True)    # gira a câmera (setas) se ficar sem ver rochas
+        self.camera_after_var = ctk.StringVar(value="10")
         self.drop_key_var = ctk.StringVar(value="-")    # Tecla do slot da barra de ações que dropa o item
         
         # Variáveis de Sobrevivência
@@ -60,7 +65,8 @@ class BotInterface:
         main_frame = ctk.CTkFrame(self.root, width=550)
         main_frame.pack(side="left", fill="both", expand=True, padx=(20, 10), pady=20)
 
-        self.session_panel = SessionPanel(self.root, ProgressStore(), on_sync=self._sync_clicked)
+        self.session_panel = SessionPanel(self.root, ProgressStore(), on_sync=self._sync_clicked,
+                                        on_read_now=self._read_now_clicked)
         self.session_panel.pack(side="right", fill="y", padx=(0, 20), pady=20)
 
         title_label = ctk.CTkLabel(main_frame, text="Configurações do Bot", font=ctk.CTkFont(size=20, weight="bold"))
@@ -204,6 +210,23 @@ class BotInterface:
         self.reclick_entry.pack(side="left")
         ctk.CTkLabel(reclick_group, text="%", text_color="gray").pack(side="left", padx=(4, 0))
 
+        # ==========================================
+        # SEÇÃO: CÂMERA (procurar rochas girando com as setas)
+        # ==========================================
+        camera_group = ctk.CTkFrame(main_frame)
+        camera_group.pack(fill="x", padx=10, pady=5)
+
+        self.camera_checkbox = ctk.CTkCheckBox(
+            camera_group, text="Girar a câmera (setas) se não vir rochas por",
+            variable=self.use_camera_var,
+            font=ctk.CTkFont(weight="bold"),
+            fg_color="#e67e22"
+        )
+        self.camera_checkbox.pack(side="left", padx=(10, 6), pady=10)
+        self.camera_entry = ctk.CTkEntry(camera_group, textvariable=self.camera_after_var, width=50)
+        self.camera_entry.pack(side="left")
+        ctk.CTkLabel(camera_group, text="s", text_color="gray").pack(side="left", padx=(4, 0))
+
         # --- Botões ---
         button_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
         button_frame.pack(pady=10)
@@ -312,23 +335,36 @@ class BotInterface:
         self.log_area.configure(state='normal')
         timestamp = datetime.datetime.now().strftime("%H:%M:%S")
         self.log_area.insert("end", f"[{timestamp}] {message}\n")
+        append_log(message)
         self.log_area.see("end")
         self.log_area.configure(state='disabled')
 
     # --- Sessão & Metas ---
 
-    def bind_session(self, snapshot_provider, on_sync):
-        """snapshot_provider(): estado da sessão para o painel; on_sync(): aplica o nível/XP digitados à sessão."""
+    def bind_session(self, snapshot_provider, on_sync, on_read_now):
+        """
+        snapshot_provider(): estado da sessão para o painel; on_sync(): aplica o nível/XP digitados;
+        on_read_now(): lê o XP na aba Skills agora.
+        """
         self._snapshot_provider = snapshot_provider
         self._on_sync = on_sync
+        self._on_read_now = on_read_now
 
     def post_event(self, event):
         """Pede um aviso (SessionEvent). Pode ser chamado de qualquer thread."""
         self._events.put(event)
 
+    def run_in_gui(self, func):
+        """Executa func() na thread da tela (para atualizar campos a partir de outra thread)."""
+        self._calls.put(func)
+
     def _sync_clicked(self):
         if self._on_sync:
             self._on_sync()
+
+    def _read_now_clicked(self):
+        if self._on_read_now:
+            self._on_read_now()
 
     def _poll(self):
         """Atualiza o painel e mostra os avisos pendentes (sempre na thread da tela)."""
@@ -340,6 +376,8 @@ class BotInterface:
                 self.session_panel.load_progress()  # sessão terminou: o nível/XP salvos viram o ponto de partida
             self._was_running = running
 
+            while not self._calls.empty():
+                self._calls.get_nowait()()
             while not self._events.empty():
                 event = self._events.get_nowait()
                 alerts.notify(self.root, event.kind, event.title, event.message)
