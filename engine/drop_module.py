@@ -5,6 +5,8 @@ import time
 import cv2
 import numpy as np
 
+from antiban import humanize
+
 
 class InventoryDropper:
     """
@@ -23,13 +25,14 @@ class InventoryDropper:
 
     MATCH_THRESHOLD = 0.85
     MIN_SLOT_DISTANCE = 15      # px entre dois picos para contarem como slots diferentes
-    RECHECK_DELAY = 1.2         # o jogo processa o drop no próximo tick (0,6s): espera antes de reclicar
+    RECHECK_DELAY = 1.2         # s (mediana): o jogo processa o drop no próximo tick (0,6s); espera antes de reclicar (sorteado)
     MAX_ATTEMPTS_PER_SLOT = 3
     MIN_CLICKS_BEFORE_ABORT = 5  # se após N cliques nada sumiu, o shift-click não está dropando
     MIN_PRESSES_BEFORE_SWITCH = 4    # se após N toques (e o tempo abaixo) nada sumiu, a tecla não dropa
     MIN_SECONDS_BEFORE_SWITCH = 2.5
-    PRESS_INTERVAL = (0.25, 0.40)    # entre o início de um toque e o próximo (sorteado a cada toque)
-    PRESS_HOLD = (0.04, 0.09)        # tempo com a tecla pressionada
+    PRESS_INTERVAL = 0.32            # s (mediana) entre o início de um toque e o próximo (sorteado a cada toque)
+    HESITATION_CHANCE = 0.06         # chance, a cada toque, de uma hesitação (pausa maior) antes do próximo
+    PRESS_HOLD = 0.065               # s (mediana) com a tecla pressionada
     PRESS_SETTLE = (0.02, 0.06)      # pausa após soltar a tecla
     MAX_DURATION = 90.0
 
@@ -74,8 +77,9 @@ class InventoryDropper:
     def start(self):
         """Nova rodada de drop: zera o controle e sorteia o método (tecla ou shift-click)."""
         self._reset()
-        self._mode = random.choice(["hotkey", "shift"]) if self.hotkey else "shift"
+        self._mode = humanize.choice(["hotkey", "shift"]) if self.hotkey else "shift"
         self._tried = {self._mode}
+        self._next_press = time.time() + humanize.human_delay(0.7, 0.4, 0.4, 2.5)   # o 1º toque não é imediato
         self.log(f"[DROP] Método desta rodada: {self._method_name(self._mode)}")
 
     def _method_name(self, mode: str) -> str:
@@ -115,28 +119,9 @@ class InventoryDropper:
         Centros (x, y), em coordenadas do frame, dos slots da mochila com o item,
         em ordem de leitura (linha a linha). None se a mochila não estiver visível.
         """
-        roi = self.inventory.get_slots_roi(frame)
-        if roi is None or self.template is None:
+        if self.template is None:
             return None
-
-        x0, y0, x1, y1 = roi
-        region = frame[y0:y1, x0:x1]
-        th, tw = self.template.shape[:2]
-        if region.shape[0] < th or region.shape[1] < tw:
-            return None
-
-        result = cv2.matchTemplate(region, self.template, cv2.TM_CCOEFF_NORMED)
-        ys, xs = np.where(result >= self.MATCH_THRESHOLD)
-
-        # Supressão de não-máximos: mantém só o melhor pico de cada slot
-        peaks = sorted(zip(xs.tolist(), ys.tolist()), key=lambda p: -result[p[1], p[0]])
-        kept = []
-        for x, y in peaks:
-            if all(abs(x - kx) > self.MIN_SLOT_DISTANCE or abs(y - ky) > self.MIN_SLOT_DISTANCE for kx, ky in kept):
-                kept.append((x, y))
-
-        centers = [(x0 + x + tw // 2, y0 + y + th // 2) for x, y in kept]
-        return sorted(centers, key=lambda c: (round(c[1] / 20), c[0]))
+        return self.inventory.find_item_slots(frame, self.template, self.MATCH_THRESHOLD, self.MIN_SLOT_DISTANCE)
 
     def step(self, frame: np.ndarray) -> str:
         """Executa no máximo um clique. Retorna WORKING, DONE ou FAILED."""
@@ -176,11 +161,14 @@ class InventoryDropper:
                 self._press_started = now
             self.keyboard.press(
                 self.hotkey,
-                duration=random.uniform(*self.PRESS_HOLD),
+                duration=humanize.human_delay(self.PRESS_HOLD, 0.3, 0.55, 2.2),
                 settle=self.PRESS_SETTLE,
             )
             self._presses += 1
-            self._next_press = now + random.uniform(*self.PRESS_INTERVAL)
+            pause = humanize.human_delay(self.PRESS_INTERVAL, 0.3, 0.6, 2.2)
+            if humanize.chance(self.HESITATION_CHANCE):
+                pause += humanize.uniform(0.6, 1.5)
+            self._next_press = now + pause
         return self.WORKING
 
     def _fail_stalled(self) -> str:
@@ -202,7 +190,7 @@ class InventoryDropper:
             attempts, last_click = self._attempts.get(key, (0, 0.0))
             if attempts >= self.MAX_ATTEMPTS_PER_SLOT:
                 continue
-            if now - last_click < self.RECHECK_DELAY:
+            if now - last_click < humanize.human_delay(self.RECHECK_DELAY, 0.25, 0.7, 1.6):
                 waiting = True
                 continue
             pending.append((pos, key, attempts))
@@ -213,7 +201,8 @@ class InventoryDropper:
             self.log("[DROP] Alguns itens não puderam ser dropados.")
             return self.FAILED
 
-        pos, key, attempts = pending[0]
+        # quase sempre o próximo da fila, mas às vezes um dos seguintes (ninguém dropa sempre na mesma ordem)
+        pos, key, attempts = pending[humanize.randint(0, min(len(pending), 3) - 1) if humanize.chance(0.35) else 0]
         if self._drop_slot(pos):
             self._attempts[key] = (attempts + 1, time.time())
             self._clicks += 1
@@ -237,7 +226,7 @@ class InventoryDropper:
         abs_x, abs_y = pos[0] + region["left"], pos[1] + region["top"]
         self.keyboard.key_down("shift")
         try:
-            time.sleep(random.uniform(0.04, 0.1))
+            time.sleep(humanize.human_delay(0.07, 0.35, 0.5, 2.2))
             self.mouse.human_click_at(abs_x, abs_y)
         finally:
             self.keyboard.key_up("shift")

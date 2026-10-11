@@ -48,3 +48,12 @@ runs/
 yolov8*.pt
 dataset/
 debug/
+
+# Progresso pessoal (nível/XP estimados, metas) — gerado pelo bot
+config/progress.json
+config/progress.json.tmp
+# Dígitos da fonte do jogo aprendidos pelo leitor de XP (por instalação)
+config/fonte_xp_aprendida.json
+config/fonte_xp_aprendida.json.tmp
+# Log do bot por dia
+logs/

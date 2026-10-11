@@ -1,6 +1,6 @@
 import time
-import random
 import pydirectinput
+from antiban import humanize
 from typing import Callable, Optional, Tuple
 
 class KeyboardActuator:
@@ -29,7 +29,7 @@ class KeyboardActuator:
 
         if duration is None:
             # Human-like key press duration (50ms to 150ms)
-            duration = random.uniform(0.05, 0.15)
+            duration = humanize.human_delay(0.09, 0.3, 0.55, 2.0)
             
         print(f"[{time.strftime('%X')}] Keyboard: Pressionando '{key}' por {duration:.2f}s")
         
@@ -38,7 +38,7 @@ class KeyboardActuator:
         pydirectinput.keyUp(key)
         
         # Small delay after releasing the key
-        time.sleep(random.uniform(*settle))
+        time.sleep(humanize.uniform(*settle))
 
     def key_down(self, key: str):
         """Mantém a tecla pressionada (ex.: shift para shift-click). Sempre pareie com key_up."""

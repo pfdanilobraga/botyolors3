@@ -14,6 +14,24 @@
       "priority_targets": [
         "mithril_rockbuff"
       ]
+    },
+    "Adamantite": {
+      "model": "models/mineracao/mini_adamantite.pt",
+      "target": "adamantite_rock",
+      "xp_validator": "indicadores/xp_mineracao.png",
+      "drop_item": "adamantite_ore.png",
+      "priority_targets": [
+        "adamantite_rockbuff"
+      ]
+    },
+    "Runite": {
+      "model": "models/mineracao/mini_runite.pt",
+      "target": "runite_rock",
+      "xp_validator": "indicadores/xp_mineracao.png",
+      "drop_item": "adamantite_ore.png",
+      "priority_targets": [
+        "runite_rockbuff"
+      ]
     }
   }
 }
